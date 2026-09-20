@@ -1,0 +1,47 @@
+name: tests
+
+# Only the unit suite runs here. The integration suite drives the real
+# product: it needs a microphone, an NVIDIA GPU and a multi-gigabyte model
+# on disk, none of which a hosted runner has. Run it locally with
+# `pwsh -File tests/integration.ps1` before publishing a release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the pinned AutoHotkey
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $a = (Get-Content versions.json -Raw | ConvertFrom-Json).autohotkey
+          $url = "https://github.com/$($a.repo)/releases/download/$($a.tag)/$($a.asset)"
+          Write-Host "Fetching $url"
+          Invoke-WebRequest $url -OutFile ahk.zip
+          $got = (Get-FileHash ahk.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $a.sha256) {
+            throw "SHA-256 mismatch for $($a.asset): expected $($a.sha256), got $got"
+          }
+          Expand-Archive ahk.zip -DestinationPath ahk
+
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          $p = Start-Process "$PWD\ahk\AutoHotkey64.exe" `
+               -ArgumentList "/ErrorStdOut", "$PWD\tests\run-tests.ahk" `
+               -NoNewWindow -Wait -PassThru
+          if (Test-Path tests\results.txt) { Get-Content tests\results.txt }
+          if ($p.ExitCode -ne 0) { throw "$($p.ExitCode) assertion(s) failed" }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: tests/results.txt

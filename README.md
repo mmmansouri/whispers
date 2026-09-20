@@ -139,6 +139,54 @@ Everything else — the whisper.cpp binaries, ffmpeg, AutoHotkey and the
 model — is fetched or shipped by the installer. Nothing needs to be
 installed system-wide and no administrator rights are required.
 
+## Tests
+
+Two suites, split by what each can actually prove.
+
+**Unit** — `tests/run-tests.ahk`, 201 assertions over the pure core in
+`lib/`. Including `lib/` executes nothing, so the runner loads it without
+starting a server, arming a hotkey or opening a microphone. It exits with
+the number of failures and writes `tests/results.txt`, and it runs in CI.
+
+```
+AutoHotkey64.exe tests/run-tests.ahk
+```
+
+**Integration** — `tests/integration.ps1`, 41 assertions that drive the
+real product: it launches Whispers, presses the hotkey through
+`keybd_event` and asserts on the log. Process lifetimes, model loading,
+thread interruption and orphaned recorders only exist at this level.
+
+```
+pwsh -File tests/integration.ps1
+```
+
+It needs a microphone, an NVIDIA GPU and a model on disk, so it cannot
+run in CI. It forces auto-paste off for the duration, so a transcription
+can never land in whatever window happens to have focus, and it restores
+your own settings afterwards even when it fails.
+
+### What the REGRESSION assertions are for
+
+Each one is a bug that reached the running product and was caught by
+hand. They exist so it cannot happen twice.
+
+| Assertion | The bug it pins down |
+| --- | --- |
+| `cpu resolves to the model tier` | Tier names collide with engine variant names in `versions.json`; the CPU tier resolved to a zip, not a model. |
+| `an empty document never yields a plausible default` | A missing `versions.json` silently loaded a different model than the one selected. |
+| `the virtual cable that beat the real mic` | Level-based microphone detection chose a virtual audio cable at −25.9 dB over the real microphone at −80.3 dB. |
+| `no second server is spawned` | A thread interruption let a warm-up resume after the transcription had finished, starting a second server. |
+| `no recorder is left behind` | An ffmpeg capture survived the end of a dictation. |
+| `the hotkey is never live while no microphone is set` | The hotkey was armed during first-run detection, so an early press failed with advice to go and fix something that was about to fix itself. |
+| `tabs are stripped before a TSV write` | A transcription containing a tab corrupted the history file. |
+| `a cleared field is whitespace, not a path` | `ModelsDir= ` was treated as a directory named " ". |
+
+### What neither suite covers
+
+Transcription accuracy on real speech, the settings window, and the tray
+menu. Those need a human.
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE). whisper.cpp is MIT; ffmpeg is redistributed

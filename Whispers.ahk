@@ -1,6 +1,14 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
+; The pure core. These files define functions only - including them runs
+; nothing - which is what lets the test runner load them in isolation.
+#Include %A_LineFile%\..\lib\Text.ahk
+#Include %A_LineFile%\..\lib\Config.ahk
+#Include %A_LineFile%\..\lib\Tiers.ahk
+#Include %A_LineFile%\..\lib\Devices.ahk
+#Include %A_LineFile%\..\lib\Commands.ahk
+
 ; =====================================================================
 ; Whispers - push-to-talk dictation powered by whisper.cpp
 ;
@@ -113,7 +121,6 @@ ResolvePaths()
 CreateIndicator()
 LoadHistory()
 BuildTray()
-ApplyHotkey(Cfg["Hotkey"])
 SetTimer(CheckIdle, 30000)
 
 LogMsg("INFO", APP_NAME " " APP_VERSION " started. Root=" ROOT_DIR)
@@ -130,7 +137,11 @@ if (VerRead() = "") {
     LogMsg("INFO", "Tier=" Cfg["Tier"] " (" TierFile(Cfg["Tier"]) ") Policy=" Cfg["VramPolicy"])
 }
 
-; A first run has no microphone yet. Pick one by measuring, not by guessing.
+; A first run has no microphone yet. Resolve it BEFORE arming the hotkey:
+; detection can take several seconds when it has to fall back to measuring
+; levels, and a key press landing in that window used to fail with "No
+; microphone configured" - telling the user to go and fix something that
+; was about to fix itself.
 if (Cfg["Mic"] = "") {
     LogMsg("INFO", "No microphone configured - running auto-detection")
     Toast("Detecting your microphone...", 3000)
@@ -144,6 +155,10 @@ if (Cfg["Mic"] = "") {
     }
 }
 
+; From here on the hotkey is safe to press.
+ApplyHotkey(Cfg["Hotkey"])
+LogMsg("INFO", "Hotkey armed: " Cfg["Hotkey"])
+
 if (Cfg["VramPolicy"] = "resident")
     StartServer("startup resident policy")
 
@@ -152,48 +167,29 @@ if (Cfg["PlaySounds"])
     SoundBeep(800, 100)
 Toast(APP_NAME " ready - hold " Cfg["Hotkey"], 2500)
 
-; =====================================================================
-; Configuration
-; =====================================================================
 LoadConfig() {
     global Cfg, INI_FILE
-    Cfg := Map(
-        ; Audio. Mic is deliberately empty by default: it is a property of
-        ; the machine, never of the product, and is resolved on first run.
-        "Mic",           IniRead(INI_FILE, "Audio",  "Mic",           ""),
-        "MinBytes",      IniRead(INI_FILE, "Audio",  "MinBytes",      "8000"),
-        "TrimSilence",   IniRead(INI_FILE, "Audio",  "TrimSilence",   "0"),
-        ; Engine. The user picks a tier, never a model file.
-        "Tier",          IniRead(INI_FILE, "Engine", "Tier",          "balanced"),
-        "Language",      IniRead(INI_FILE, "Engine", "Language",      "fr"),
-        "VramPolicy",    IniRead(INI_FILE, "Engine", "VramPolicy",    "idle"),
-        "IdleMinutes",   IniRead(INI_FILE, "Engine", "IdleMinutes",   "5"),
-        "Port",          IniRead(INI_FILE, "Engine", "Port",          "8910"),
-        "LoadTimeout",   IniRead(INI_FILE, "Engine", "LoadTimeout",   "90"),
-        "CpuFallback",   IniRead(INI_FILE, "Engine", "CpuFallback",   "1"),
-        ; Paths. Empty means "use the default next to this script".
-        "BinDir",        IniRead(INI_FILE, "Paths",  "BinDir",        ""),
-        "ModelsDir",     IniRead(INI_FILE, "Paths",  "ModelsDir",     ""),
-        ; UI.
-        "Hotkey",        IniRead(INI_FILE, "UI",     "Hotkey",        "F9"),
-        "AutoPaste",     IniRead(INI_FILE, "UI",     "AutoPaste",     "1"),
-        "PlaySounds",    IniRead(INI_FILE, "UI",     "PlaySounds",    "1"),
-        "ShowIndicator", IniRead(INI_FILE, "UI",     "ShowIndicator", "1")
-    )
+    Cfg := Map()
+    for key, spec in ConfigSpec()
+        Cfg[key] := IniRead(INI_FILE, spec[1], key, spec[2])
+
+    ; Clamp on the way in, not only on the way out: the INI is a text file
+    ; a user can edit, and a nonsensical value there must not be able to
+    ; stop Whispers from starting.
+    Cfg["Port"]        := SanitizePort(Cfg["Port"])
+    Cfg["IdleMinutes"] := SanitizeIdleMinutes(Cfg["IdleMinutes"])
+    Cfg["LoadTimeout"] := SanitizeLoadTimeout(Cfg["LoadTimeout"])
+    Cfg["MinBytes"]    := SanitizeMinBytes(Cfg["MinBytes"])
+    if !IsValidTier(Cfg["Tier"])
+        Cfg["Tier"] := "balanced"
+    if !IsValidPolicy(Cfg["VramPolicy"])
+        Cfg["VramPolicy"] := "idle"
 }
 
 SaveConfig() {
     global Cfg, INI_FILE
-    section := Map(
-        "Mic","Audio", "MinBytes","Audio", "TrimSilence","Audio",
-        "Tier","Engine", "Language","Engine", "VramPolicy","Engine",
-        "IdleMinutes","Engine", "Port","Engine", "LoadTimeout","Engine",
-        "CpuFallback","Engine",
-        "BinDir","Paths", "ModelsDir","Paths",
-        "Hotkey","UI", "AutoPaste","UI", "PlaySounds","UI", "ShowIndicator","UI"
-    )
-    for key, sec in section
-        IniWrite(Cfg[key], INI_FILE, sec, key)
+    for key, spec in ConfigSpec()
+        IniWrite(Cfg[key], INI_FILE, spec[1], key)
     LogMsg("INFO", "Settings saved")
 }
 
@@ -202,8 +198,8 @@ SaveConfig() {
 ResolvePaths() {
     global Cfg, ROOT_DIR, BIN_DIR, MODELS_DIR, SERVER_EXE, CLI_EXE, FFMPEG_EXE
 
-    BIN_DIR    := Cfg["BinDir"]    != "" ? Cfg["BinDir"]    : ROOT_DIR "\bin"
-    MODELS_DIR := Cfg["ModelsDir"] != "" ? Cfg["ModelsDir"] : ROOT_DIR "\models"
+    BIN_DIR    := ResolveDir(Cfg["BinDir"],    ROOT_DIR "\bin")
+    MODELS_DIR := ResolveDir(Cfg["ModelsDir"], ROOT_DIR "\models")
 
     SERVER_EXE := BIN_DIR "\whisper-server.exe"
     CLI_EXE    := BIN_DIR "\whisper-cli.exe"
@@ -223,9 +219,9 @@ ResolvePaths() {
 ; =====================================================================
 ; versions.json
 ;
-; A targeted reader rather than a full JSON parser: this file is authored
-; and shipped by us, every tier object is flat, and the alternative is
-; several hundred lines of parser for four lookups.
+; Reads the pinned versions file once and caches it. The parsing itself
+; lives in lib\Tiers.ahk, which takes the document as an argument so it
+; can be tested against malformed input.
 ; =====================================================================
 VerRead() {
     global VER_FILE
@@ -238,59 +234,25 @@ VerRead() {
     return cache
 }
 
-TierField(tier, field) {
-    txt := VerRead()
-    if (txt = "")
-        return ""
-    ; Anchor on the models.tiers object first. Tier names collide with the
-    ; engine variant names - "cpu" exists in both - and searching the whole
-    ; document would match the engine variant, which has no "file" key.
-    pos := InStr(txt, '"tiers"')
-    if (!pos)
-        return ""
-    txt := SubStr(txt, pos)
-    ; Scope to the tier's own object: tiers contain no nested braces.
-    if RegExMatch(txt, '"' tier '"\s*:\s*\{([^}]*)\}', &block) {
-        if RegExMatch(block[1], '"' field '"\s*:\s*"([^"]*)"', &s)
-            return s[1]
-        if RegExMatch(block[1], '"' field '"\s*:\s*([^,\s}]+)', &n)
-            return n[1]
-    }
-    return ""
-}
 
-; Returns "" when the tier cannot be resolved. Deliberately NOT falling back
-; to some default model: silently loading a different model than the one the
-; user selected is worse than refusing to start.
+; Returns "" when the tier cannot be resolved. Deliberately NOT falling
+; back to some default model: silently loading a different model than the
+; one selected is worse than refusing to start.
 TierFile(tier) {
-    f := TierField(tier, "file")
+    f := TierFileFrom(VerRead(), tier)
     if (f = "")
         LogMsg("ERROR", "versions.json: cannot resolve tier '" tier "' - is the file present and intact?")
     return f
 }
 
 TierVram(tier) {
-    v := TierField(tier, "vram_mb")
-    return IsInteger(v) ? Integer(v) : 0
+    return TierVramFrom(VerRead(), tier)
 }
 
 TierNeedsGpu(tier) {
-    return TierField(tier, "requires_gpu") = "true"
+    return TierNeedsGpuFrom(VerRead(), tier)
 }
 
-TierList() {
-    return ["fast", "balanced", "max", "cpu"]
-}
-
-TierLabel(tier) {
-    switch tier {
-        case "fast":     return "Fast - smallest, runs on a modest GPU"
-        case "balanced": return "Balanced - recommended"
-        case "max":      return "Maximum accuracy - largest"
-        case "cpu":      return "CPU only - no NVIDIA GPU required"
-    }
-    return tier
-}
 
 ModelPath() {
     global MODELS_DIR, Cfg
@@ -317,42 +279,24 @@ TailFile(path, maxChars := 400) {
     if !FileExist(path)
         return ""
     try {
-        txt := FileRead(path, "UTF-8")
+        return TailText(FileRead(path, "UTF-8"), maxChars)
     } catch {
         return ""
     }
-    txt := Trim(StrReplace(StrReplace(txt, "`r", " "), "`n", " "))
-    if (StrLen(txt) > maxChars)
-        txt := "..." SubStr(txt, -maxChars)
-    return txt
 }
 
-; Wraps a command line for cmd.exe. /s makes cmd strip exactly the
-; first and last quote, which keeps embedded quoting predictable.
-ShellCmd(inner) {
-    return A_ComSpec ' /s /c "' inner '"'
-}
 
-; =====================================================================
-; Device enumeration and microphone auto-detection
-; =====================================================================
 GetAudioDevices() {
     global FFMPEG_EXE, DEV_LOG, ROOT_DIR
-    devices := []
     try FileDelete(DEV_LOG)
-    RunWait(ShellCmd('"' FFMPEG_EXE '" -hide_banner -list_devices true -f dshow -i dummy 2> "' DEV_LOG '"'), ROOT_DIR, "Hide")
+    RunWait(ShellCmd(CmdListDevices(FFMPEG_EXE, DEV_LOG)), ROOT_DIR, "Hide")
     if !FileExist(DEV_LOG)
-        return devices
+        return []
     try {
-        txt := FileRead(DEV_LOG, "UTF-8")
+        return ParseDshowAudioDevices(FileRead(DEV_LOG, "UTF-8"))
     } catch {
-        return devices
+        return []
     }
-    for line in StrSplit(txt, "`n", "`r") {
-        if RegExMatch(line, '"([^"]+)"\s+\(audio\)', &m)
-            devices.Push(m[1])
-    }
-    return devices
 }
 
 ; Records a short sample from one device and returns its mean level in dB
@@ -364,17 +308,13 @@ MicLevel(device, seconds := 2) {
     try FileDelete(probe)
     try FileDelete(plog)
 
-    inner := '"' FFMPEG_EXE '" -y -f dshow -i audio="' device '" -t ' seconds
-           . ' -ac 1 -ar 16000 -af volumedetect -f s16le "' probe '" 2> "' plog '"'
-    RunWait(ShellCmd(inner), ROOT_DIR, "Hide")
+    RunWait(ShellCmd(CmdMicLevel(FFMPEG_EXE, device, seconds, probe, plog)), ROOT_DIR, "Hide")
 
     if (!FileExist(probe) || FileGetSize(probe) < 1000)
         return ""
-    detail := TailFile(plog, 4000)
+    level := ParseMeanVolume(TailFile(plog, 4000))
     try FileDelete(probe)
-    if RegExMatch(detail, "mean_volume:\s*(-?[\d.]+) dB", &m)
-        return m[1] + 0
-    return ""
+    return level
 }
 
 ; Asks Windows which capture endpoint is the default one.
@@ -423,30 +363,6 @@ WindowsDefaultMic() {
     }
 }
 
-; Windows endpoint names and ffmpeg's dshow names usually match exactly,
-; but dshow truncates some of them, so fall back to a prefix match before
-; giving up.
-MatchDevice(name, devices) {
-    if (name = "")
-        return ""
-    for d in devices
-        if (d = name)
-            return d
-    for d in devices
-        if (SubStr(d, 1, StrLen(name)) = name || SubStr(name, 1, StrLen(d)) = name)
-            return d
-    return ""
-}
-
-; Devices that route other programs' audio rather than a microphone. They
-; are excluded from the measured fallback because they are frequently the
-; loudest thing on the machine while carrying no speech at all.
-IsVirtualDevice(name) {
-    for pat in ["virtual", "cable", "stereo mix", "mixage", "voicemeeter", "loopback", "what u hear", "sonar"]
-        if InStr(name, pat)
-            return true
-    return false
-}
 
 ; Picks a microphone without asking the user anything.
 ;
@@ -494,8 +410,11 @@ AutoDetectMic() {
         }
     }
 
-    if (best = "") {
-        LogMsg("WARN", "No physical microphone could be probed - defaulting to " devices[1])
+    ; Every device measuring as digital silence means the probe learned
+    ; nothing at all, which is different from a quiet room. Say so instead
+    ; of presenting a guess as a measurement.
+    if (best = "" || IsSilentLevel(bestLevel)) {
+        LogMsg("WARN", "No microphone carried any signal - defaulting to " devices[1])
         return devices[1]
     }
     LogMsg("WARN", "Microphone chosen by level only (" bestLevel " dB) - verify it in Settings")
@@ -517,11 +436,10 @@ GpuInfo(refresh := false) {
     info := Map("present", false, "name", "", "vramTotal", 0, "vramFree", -1, "cudaMax", "")
 
     try FileDelete(GPU_LOG)
-    RunWait(ShellCmd('nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader,nounits > "' GPU_LOG '" 2>&1'), ROOT_DIR, "Hide")
+    RunWait(ShellCmd(CmdGpuSummary(GPU_LOG)), ROOT_DIR, "Hide")
     if FileExist(GPU_LOG) {
         try {
-            line := StrSplit(Trim(FileRead(GPU_LOG)), "`n", "`r")[1]
-            parts := StrSplit(line, ",")
+            parts := StrSplit(StrSplit(Trim(FileRead(GPU_LOG)), "`n", "`r")[1], ",")
             if (parts.Length >= 3 && IsInteger(Trim(parts[2]))) {
                 info["present"]   := true
                 info["name"]      := Trim(parts[1])
@@ -533,7 +451,7 @@ GpuInfo(refresh := false) {
 
     if (info["present"]) {
         try FileDelete(GPU_LOG)
-        RunWait(ShellCmd('nvidia-smi -q > "' GPU_LOG '" 2>&1'), ROOT_DIR, "Hide")
+        RunWait(ShellCmd(CmdGpuFull(GPU_LOG)), ROOT_DIR, "Hide")
         if FileExist(GPU_LOG) {
             try {
                 if RegExMatch(FileRead(GPU_LOG), "CUDA Version\s*:\s*([\d.]+)", &m)
@@ -550,29 +468,16 @@ FreeVramMB() {
     return GpuInfo(true)["vramFree"]
 }
 
-; The tier this machine should run, used by the installer and offered as
-; a suggestion in the settings window.
+; The tier this machine should run, shown as a suggestion in the settings
+; window. The thresholds themselves live in lib\Tiers.ahk.
 RecommendedTier() {
     g := GpuInfo()
-    if (!g["present"])
-        return "cpu"
-    total := g["vramTotal"]
-    if (total >= 8000)
-        return "max"
-    if (total >= 5000)
-        return "balanced"
-    if (total >= 3000)
-        return "fast"
-    return "cpu"
+    return RecommendTier(g["present"], g["vramTotal"])
 }
 
-; =====================================================================
-; whisper-server lifecycle
-; =====================================================================
 ServerAlive() {
     global CURL_EXE, Cfg, ROOT_DIR
-    inner := '"' CURL_EXE '" -s -o nul --max-time 2 http://127.0.0.1:' Cfg["Port"] '/'
-    return RunWait(ShellCmd(inner), ROOT_DIR, "Hide") = 0
+    return RunWait(ShellCmd(CmdServerAlive(CURL_EXE, Cfg["Port"])), ROOT_DIR, "Hide") = 0
 }
 
 StartServer(reason := "?") {
@@ -608,8 +513,7 @@ StartServer(reason := "?") {
     ; reported instead when the server actually fails to come up, and in the
     ; Engine tab of the settings window.
     try FileDelete(SRV_LOG)
-    inner := '"' SERVER_EXE '" -m "' model '" -l ' Cfg["Language"] ' -nt --port ' Cfg["Port"] ' > "' SRV_LOG '" 2>&1'
-    Run(ShellCmd(inner), ROOT_DIR, "Hide", &pid)
+    Run(ShellCmd(CmdServer(SERVER_EXE, model, Cfg["Language"], Cfg["Port"], SRV_LOG)), ROOT_DIR, "Hide", &pid)
     gServerPid := pid
     LogMsg("INFO", "Server starting via " reason " (pid " pid ", port " Cfg["Port"] ", tier " Cfg["Tier"] ")")
     return true
@@ -718,8 +622,7 @@ StartRec() {
     if (Cfg["PlaySounds"])
         SoundBeep(1500, 120)
 
-    inner := '"' FFMPEG_EXE '" -y -f dshow -i audio="' Cfg["Mic"] '" -ac 1 -ar 16000 -f s16le -flush_packets 1 "' TEMP_RAW '" 2> "' MIC_LOG '"'
-    Run(ShellCmd(inner), ROOT_DIR, "Hide", &pid)
+    Run(ShellCmd(CmdRecord(FFMPEG_EXE, Cfg["Mic"], TEMP_RAW, MIC_LOG)), ROOT_DIR, "Hide", &pid)
     gFfmpegPid := pid
 
     gRecording := true
@@ -786,18 +689,14 @@ StopRec() {
 
     rawSize := FileGetSize(TEMP_RAW)
     if (rawSize < Integer(Cfg["MinBytes"])) {
-        Fail("Too short (" Round(rawSize / 32000, 2) "s) - hold the key while speaking", "")
+        Fail("Too short (" RawBytesToSeconds(rawSize) "s) - hold the key while speaking", "")
         gStopping := false
         return false
     }
 
     IndSet("Converting...", "C87A00")
 
-    filter := Cfg["TrimSilence"]
-        ? ' -af silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.1:stop_periods=-1:stop_threshold=-50dB:stop_silence=0.4 '
-        : ' '
-    inner := '"' FFMPEG_EXE '" -y -f s16le -ar 16000 -ac 1 -i "' TEMP_RAW '"' filter '"' TEMP_WAV '" 2>> "' MIC_LOG '"'
-    RunWait(ShellCmd(inner), ROOT_DIR, "Hide")
+    RunWait(ShellCmd(CmdConvert(FFMPEG_EXE, TEMP_RAW, TEMP_WAV, MIC_LOG, Cfg["TrimSilence"])), ROOT_DIR, "Hide")
 
     if !FileExist(TEMP_WAV) {
         Fail("WAV conversion failed", TailFile(MIC_LOG, 220))
@@ -862,15 +761,9 @@ TranscribeViaServer() {
     global CURL_EXE, Cfg, TEMP_WAV, TEMP_TXT, CURL_LOG, SRV_LOG, ROOT_DIR
 
     try FileDelete(CURL_LOG)
-    inner := '"' CURL_EXE '" -s --max-time 120 -X POST http://127.0.0.1:' Cfg["Port"] '/inference'
-           . ' -F "file=@' TEMP_WAV '"'
-           . ' -F "response_format=text"'
-           . ' -F "language=' Cfg["Language"] '"'
-           . ' -F "no_timestamps=true"'
-           . ' > "' TEMP_TXT '" 2> "' CURL_LOG '"'
 
     t0 := A_TickCount
-    ec := RunWait(ShellCmd(inner), ROOT_DIR, "Hide")
+    ec := RunWait(ShellCmd(CmdInference(CURL_EXE, Cfg["Port"], TEMP_WAV, Cfg["Language"], TEMP_TXT, CURL_LOG)), ROOT_DIR, "Hide")
     ms := A_TickCount - t0
 
     if (ec != 0) {
@@ -904,14 +797,11 @@ TranscribeViaCli(forceCpu) {
         return ""
     }
     base := SubStr(TEMP_TXT, 1, StrLen(TEMP_TXT) - 4)
-    gpu  := forceCpu ? " -ng" : ""
 
     try FileDelete(TEMP_TXT)
-    inner := '"' CLI_EXE '" -m "' model '" -l ' Cfg["Language"] ' -nt' gpu
-           . ' -of "' base '" -otxt -f "' TEMP_WAV '" > "' SRV_LOG '" 2>&1'
 
     t0 := A_TickCount
-    ec := RunWait(ShellCmd(inner), ROOT_DIR, "Hide")
+    ec := RunWait(ShellCmd(CmdCli(CLI_EXE, model, Cfg["Language"], forceCpu, base, TEMP_WAV, SRV_LOG)), ROOT_DIR, "Hide")
     ms := A_TickCount - t0
 
     if !FileExist(TEMP_TXT) {
@@ -949,7 +839,7 @@ DeliverText(text) {
     if (Cfg["PlaySounds"])
         SoundBeep(1000, 60)
 
-    preview := StrLen(text) > 60 ? SubStr(text, 1, 57) "..." : text
+    preview := PreviewText(text)
     IndSet("Done", "1E7A1E")
     SetTimer(IndHide, -900)
     Toast(Cfg["AutoPaste"] ? "Pasted: " preview : "Copied: " preview, 2200)
@@ -1132,40 +1022,21 @@ ToggleServer(*) {
     BuildTray()
 }
 
-; =====================================================================
-; History
-; =====================================================================
 LoadHistory() {
     global HIST_FILE, gHistory
     gHistory := []
     if !FileExist(HIST_FILE)
         return
-    try {
-        txt := FileRead(HIST_FILE, "UTF-8")
-    } catch {
-        return
-    }
-    for line in StrSplit(txt, "`n", "`r") {
-        if (Trim(line) = "")
-            continue
-        parts := StrSplit(line, "`t")
-        if (parts.Length >= 2)
-            gHistory.Push(Map("time", parts[1], "text", parts[2]))
-    }
+    try gHistory := ParseHistoryText(FileRead(HIST_FILE, "UTF-8"))
 }
 
 AddHistory(text) {
     global gHistory, HIST_FILE
-    flat := Trim(StrReplace(StrReplace(StrReplace(text, "`r", " "), "`n", " "), "`t", " "))
-    gHistory.InsertAt(1, Map("time", FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss"), "text", flat))
+    gHistory.InsertAt(1, Map("time", FormatTime(A_Now, "yyyy-MM-dd HH:mm:ss"), "text", FlattenText(text)))
     while (gHistory.Length > 20)
         gHistory.Pop()
-
-    out := ""
-    for item in gHistory
-        out .= item["time"] "`t" item["text"] "`r`n"
     try FileDelete(HIST_FILE)
-    try FileAppend(out, HIST_FILE, "UTF-8")
+    try FileAppend(FormatHistoryText(gHistory), HIST_FILE, "UTF-8")
     RefreshHistoryView()
 }
 
@@ -1285,12 +1156,6 @@ ShowSettings(startTab := 1) {
     g.Show("w690 h500")
 }
 
-HasValue(arr, val) {
-    for v in arr
-        if (v = val)
-            return true
-    return false
-}
 
 LogDirPath() {
     global LOG_DIR
@@ -1300,10 +1165,8 @@ LogDirPath() {
 ; Maps the human-readable dropdown entry back to its tier key.
 SelectedTier() {
     global gCtl
-    for t in TierList()
-        if (TierLabel(t) = gCtl["Tier"].Text)
-            return t
-    return "balanced"
+    t := TierFromLabel(gCtl["Tier"].Text)
+    return t != "" ? t : "balanced"
 }
 
 RefreshStatus() {
@@ -1382,7 +1245,7 @@ TestMic(btn, *) {
         gCtl["MicResult"].Value := "FAILED - could not open this device"
         return
     }
-    gCtl["MicResult"].Value := (lvl <= -90)
+    gCtl["MicResult"].Value := IsSilentLevel(lvl)
         ? "Silent (" lvl " dB) - wrong device, or muted"
         : "OK - mean level " lvl " dB"
 }
@@ -1421,9 +1284,14 @@ SaveSettings(btn, *) {
 
     Cfg["Tier"] := SelectedTier()
     Cfg["VramPolicy"] := gCtl["VramPolicy"].Text
-    Cfg["IdleMinutes"] := gCtl["IdleMinutes"].Value
-    Cfg["Port"] := gCtl["Port"].Value
-    Cfg["LoadTimeout"] := gCtl["LoadTimeout"].Value
+    ; Three free-text boxes: clamp before storing, and write the clamped
+    ; value straight back so the user sees what was actually kept.
+    Cfg["IdleMinutes"] := SanitizeIdleMinutes(gCtl["IdleMinutes"].Value)
+    Cfg["Port"] := SanitizePort(gCtl["Port"].Value)
+    Cfg["LoadTimeout"] := SanitizeLoadTimeout(gCtl["LoadTimeout"].Value)
+    gCtl["IdleMinutes"].Value := Cfg["IdleMinutes"]
+    gCtl["Port"].Value := Cfg["Port"]
+    gCtl["LoadTimeout"].Value := Cfg["LoadTimeout"]
     Cfg["CpuFallback"] := gCtl["CpuFallback"].Value
 
     if (newHotkey != gCurHotkey)

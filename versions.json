@@ -41,6 +41,27 @@
     }
   },
 
+  "autohotkey": {
+    "_comment": [
+      "Shipped alongside Whispers.ahk rather than installed system-wide:",
+      "the official interpreter is a binary every antivirus already knows,",
+      "whereas an Ahk2Exe-compiled script trips their packer heuristics.",
+      "Raising this pin means re-running BOTH test suites, because the",
+      "interpreter is what executes every line of the product."
+    ],
+    "repo": "AutoHotkey/AutoHotkey",
+    "tag": "v2.0.28",
+    "asset": "AutoHotkey_2.0.28.zip",
+    "size": 3155126,
+    "sha256": "b63be7548792b4ad0dfe424d91cc69376694ed2f758245b7a75a0c77d693b478",
+    "extract": ["AutoHotkey64.exe"],
+    "validated": {
+      "date": "2026-09-20",
+      "host": "Windows 11 26200",
+      "checks": ["201 unit assertions", "41 integration assertions"]
+    }
+  },
+
   "ffmpeg": {
     "repo": "GyanD/codexffmpeg",
     "tag": "9.0.2",

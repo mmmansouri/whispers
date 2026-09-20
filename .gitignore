@@ -7,6 +7,10 @@
 # Build output of the installer.
 /dist/
 
+# Test output.
+/tests/results.txt
+/tests/err.txt
+
 # Scratch space used by the validation scripts.
 /.work/
 /.probe*

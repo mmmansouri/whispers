@@ -4,6 +4,10 @@
 /models/
 /AutoHotkey64.exe
 
+# Generated on every build from versions.json, and the .iss refuses
+# to compile without it - so there is nothing to keep in sync here.
+/installer/pins.iss
+
 # Build output of the installer.
 /dist/
 

@@ -8,6 +8,54 @@ Powered by [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
 
 ---
 
+## Installing
+
+Run `Whispers-<version>-setup.exe`. It installs per user, under
+`%LOCALAPPDATA%\Whispers`, and **never asks for administrator rights**.
+
+The wizard reads the GPU, preselects the tier that machine can run, and
+downloads four things: the whisper.cpp engine build matching the CUDA
+version the driver reports, ffmpeg, the AutoHotkey interpreter, and the
+one model for the selected tier. Each download is rejected unless its
+SHA-256 matches `versions.json`.
+
+Uninstalling removes the install root, including everything that was
+downloaded into it. Your settings, logs and history live in
+`%APPDATA%\Whispers`, and you are asked before those are touched.
+
+### Unattended install
+
+```
+Whispers-2.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
+  /DIR="C:\Apps\Whispers" /TIER=balanced /MERGETASKS="!desktopicon"
+```
+
+| Switch | Effect |
+| --- | --- |
+| `/TIER=` | `fast`, `balanced`, `max` or `cpu`. A tier the machine cannot run is refused, not half-honoured. |
+| `/ENGINE=cpu` | Forces the CPU engine build on a machine that could run CUDA — for when the GPU is reserved for something else. |
+| `/DIR=` | Install root. |
+| `/MERGETASKS=` | `!desktopicon`, `!startup` to opt out; the startup entry is on by default. |
+
+Without `/TIER=`, a silent install takes the tier the hardware suggests,
+or the one already configured if Whispers was installed before.
+
+### Building the installer
+
+```
+.	oolsuild-installer.ps1
+```
+
+It projects `versions.json` into `installer\pins.iss` and compiles with
+[Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`). Every URL and hash the
+installer uses comes from that projection, so a pin is never written
+twice — and `installer\Whispers.iss` refuses to compile without
+`pins.iss`, which is what stops anyone building it by hand with stale
+values.
+
+---
+
 ## Why it is fast
 
 A naive integration spawns `whisper-cli` per dictation and pays the model
@@ -141,9 +189,9 @@ installed system-wide and no administrator rights are required.
 
 ## Tests
 
-Two suites, split by what each can actually prove.
+Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 201 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 219 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.
@@ -165,6 +213,30 @@ It needs a microphone, an NVIDIA GPU and a model on disk, so it cannot
 run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
+
+**Installer** — `tests/installer.ps1`, 66 assertions in two halves.
+
+```
+pwsh -File tests/installer.ps1 -StaticOnly   # sources only, runs in CI
+pwsh -File tests/installer.ps1               # installs for real, ~600 MB
+```
+
+The static half compares the installer's sources against `versions.json`
+key by key, and against `lib/Tiers.ahk`: the installer runs before the
+application exists on disk, so it carries its own copy of the VRAM
+thresholds, and that assertion is what stops the two copies drifting
+apart.
+
+The full run builds the installer, installs it silently into a temporary
+directory, and checks what actually landed — the file set, the model's
+SHA-256, the absence of the 25 executables the upstream archives carry
+and Whispers never runs, and whether each installed binary can resolve
+its own DLLs. Then it uninstalls and checks the machine is clean.
+
+It seeds the same INI a real install does, so it backs up your settings
+first and restores them even when it fails, and it refuses to start
+while Whispers is running — a running instance would save its
+configuration on top of that restore.
 
 ### What the REGRESSION assertions are for
 

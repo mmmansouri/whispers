@@ -1,9 +1,14 @@
 name: tests
 
-# Only the unit suite runs here. The integration suite drives the real
-# product: it needs a microphone, an NVIDIA GPU and a multi-gigabyte model
-# on disk, none of which a hosted runner has. Run it locally with
-# `pwsh -File tests/integration.ps1` before publishing a release.
+# Two suites run here: the unit suite over the pure core, and the static
+# half of the installer suite, which only reads sources.
+#
+# What cannot run on a hosted runner:
+#   tests/integration.ps1        needs a microphone, an NVIDIA GPU and a
+#                                multi-gigabyte model on disk
+#   tests/installer.ps1          without -StaticOnly it installs for real
+#                                and downloads about 600 MB
+# Run both locally before publishing a release.
 
 on:
   push:
@@ -45,3 +50,16 @@ jobs:
         with:
           name: unit-test-results
           path: tests/results.txt
+
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No Inno Setup and no network needed: these assertions compare the
+      # installer's sources against versions.json and against
+      # lib/Tiers.ahk, which is where the two copies of the VRAM
+      # thresholds would otherwise drift apart unnoticed.
+      - name: Check the installer against versions.json
+        shell: pwsh
+        run: pwsh -File tests/installer.ps1 -StaticOnly

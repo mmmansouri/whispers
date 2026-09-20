@@ -41,7 +41,7 @@ tray menu, and an upgrade from a working installation never sees it.
 ### Unattended install
 
 ```
-Whispers-2.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
+Whispers-2.1.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
   /DIR="C:\Apps\Whispers" /TIER=balanced /MERGETASKS="!desktopicon"
 ```
 

@@ -90,6 +90,20 @@ function Pin($name) {
 
 AssertEq 'the installer version is the product version' $version.whispers (Pin 'AppVersion')
 
+# The application reports APP_VERSION to the update check. If it lags
+# behind versions.json, everyone who installs the new release is told
+# forever that the release they are running is available.
+$appVersion = $null
+if ((Get-Content (Join-Path $root 'Whispers.ahk') -Raw) -match 'APP_VERSION\s*:=\s*"([^"]+)"') {
+    $appVersion = $Matches[1]
+}
+AssertEq 'the running application reports the same version' $version.whispers $appVersion
+
+$readme = Get-Content (Join-Path $root 'README.md') -Raw
+AssertTrue 'the README example names the version that is built' `
+    ($readme -match [regex]::Escape("Whispers-$($version.whispers)-setup.exe")) `
+    'the unattended-install example points at a different build'
+
 foreach ($t in 'fast', 'balanced', 'max', 'cpu') {
     $key = $t.Substring(0,1).ToUpper() + $t.Substring(1)
     AssertEq "the $t tier pins the file versions.json names" `

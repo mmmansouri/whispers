@@ -82,12 +82,69 @@ function WaitForLog($pattern, $timeoutSec = 60, $atLeast = 1) {
     return $false
 }
 
-function WriteIni($tier, $modelsDir) {
+# $configured=1 is the normal case: every group below tests a machine
+# that has already been set up. The one group that does not pass it is
+# the one testing what a brand-new installation does.
+#
+# CheckUpdates=0 throughout: these tests must not depend on the network,
+# and an update notice appearing mid-run would be noise.
+function WriteIni($tier, $modelsDir, $configured = 1) {
     $lines = @('[Audio]', 'Mic=', '[Engine]', "Tier=$tier", 'Language=fr',
                'VramPolicy=idle', '[UI]', 'AutoPaste=0', 'PlaySounds=0',
-               'ShowIndicator=0')
+               'ShowIndicator=0', 'CheckUpdates=0', "Configured=$configured")
     if ($modelsDir) { $lines += @('[Paths]', "ModelsDir=$modelsDir") }
     Set-Content -Path $ini -Value $lines -Encoding Ascii
+}
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class WhispersFind {
+  delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr p);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+
+  public static IntPtr ByTitle(string needle) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => {
+      if (!IsWindowVisible(h)) return true;
+      var sb = new StringBuilder(256);
+      GetWindowText(h, sb, sb.Capacity);
+      if (sb.ToString().IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0) {
+        found = h; return false;
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+
+  public static bool Close(string needle) {
+    IntPtr h = ByTitle(needle);
+    if (h == IntPtr.Zero) return false;
+    return PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero);  // WM_CLOSE
+  }
+}
+'@ -EA SilentlyContinue
+
+function WaitForWindow($needle, $timeoutSec = 30) {
+    $deadline = (Get-Date).AddSeconds($timeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if ([WhispersFind]::ByTitle($needle) -ne [IntPtr]::Zero) { return $true }
+        Start-Sleep -Milliseconds 300
+    }
+    return $false
+}
+
+function IniValue($section, $key) {
+    $in = $false
+    foreach ($line in (Get-Content $ini -EA SilentlyContinue)) {
+        if ($line -match '^\s*\[(.+)\]\s*$') { $in = ($Matches[1] -eq $section); continue }
+        if ($in -and $line -match "^\s*$key\s*=\s*(.*)$") { return $Matches[1].Trim() }
+    }
+    return $null
 }
 
 function StartWhispers {
@@ -264,6 +321,47 @@ try {
     Start-Sleep -Seconds 2
     $servers = @(Get-Process whisper-server -EA SilentlyContinue)
     AssertTrue 'exiting releases the server and its VRAM' ($servers.Count -eq 0) "$($servers.Count) still running"
+
+    # ---------------------------------------------------------------
+    Group 'A brand-new installation'
+    # No Configured marker and no microphone: exactly what an installer
+    # leaves behind. This is the only state that opens the setup window,
+    # and getting it wrong in either direction is visible - an upgrade
+    # greeted by a wizard, or a new user left with no guidance at all.
+    StopEverything
+    WriteIni 'cpu' $modelsDir 0
+    $app = StartWhispers
+    AssertTrue 'it starts' (WaitForLog 'Hotkey armed' 60) 'never armed'
+    AssertTrue 'a first run opens the setup window' (WaitForWindow 'setup' 30) `
+        'no window with "setup" in its title appeared'
+    # The hotkey has to keep working while it is open: the window's last
+    # step asks the user to dictate into it.
+    Dictate $HoldSeconds
+    AssertTrue 'dictation works while setup is open' (WaitForLog 'Transcribed via' 120) `
+        'no transcription with the setup window open'
+    AssertTrue 'closing the window ends setup' ([WhispersFind]::Close('setup')) 'no window to close'
+    Start-Sleep -Seconds 2
+    AssertLog 'finishing setup is recorded in the log' 'Setup finished'
+    AssertTrue 'setup is recorded in the INI, not just in the log' `
+        ((IniValue 'UI' 'Configured') -eq '1') `
+        "Configured is '$(IniValue 'UI' 'Configured')', so setup would run again on every start"
+    AssertTrue 'the microphone it detected was kept' ((IniValue 'Audio' 'Mic') -ne '') `
+        'setup finished with no microphone recorded'
+
+    RequestExit $app | Out-Null
+    Start-Sleep -Seconds 2
+    $app = StartWhispers
+    AssertTrue 'it starts again' (WaitForLog 'Hotkey armed' 60) 'never armed'
+    # Long enough for the deferred update check to have fired: asserting
+    # on its absence after three seconds would only prove the timer had
+    # not run yet.
+    AssertTrue 'the update check runs, deferred' (WaitForLog 'Update check' 40) `
+        'no update check line within 40 s'
+    AssertLog 'and it is skipped when turned off' 'Update check skipped: turned off'
+    RefuteLog 'so nothing was sent to GitHub' 'api.github.com'
+    AssertTrue 'a configured machine is never shown the setup window again' `
+        ([WhispersFind]::ByTitle('setup') -eq [IntPtr]::Zero) `
+        'the setup window came back on an already-configured machine'
 
     # ---------------------------------------------------------------
     Group 'Recovery after a hard kill'

@@ -218,8 +218,12 @@ try {
     foreach ($f in 'Whispers.ahk', 'versions.json', 'LICENSE', 'README.md', 'AutoHotkey64.exe') {
         AssertTrue "$f is installed" (Test-Path (Join-Path $target $f)) "missing from $target"
     }
+    # Counted from the repository rather than written down, so adding a
+    # module to the core cannot leave this assertion quietly passing on
+    # an installer that no longer ships all of it.
+    $libExpected = @(Get-ChildItem (Join-Path $root 'lib') -Filter '*.ahk').Count
     $libCount = @(Get-ChildItem (Join-Path $target 'lib') -Filter '*.ahk' -EA SilentlyContinue).Count
-    AssertEq 'the whole pure core is installed' 5 $libCount
+    AssertEq 'the whole pure core is installed' $libExpected $libCount
 
     foreach ($f in 'whisper-server.exe', 'whisper-cli.exe', 'ffmpeg.exe') {
         AssertTrue "bin\$f is installed" (Test-Path (Join-Path $target "bin\$f")) "missing from $target\bin"

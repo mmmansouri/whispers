@@ -22,6 +22,7 @@
 #Include %A_LineFile%\..\..\lib\Tiers.ahk
 #Include %A_LineFile%\..\..\lib\Devices.ahk
 #Include %A_LineFile%\..\..\lib\Commands.ahk
+#Include %A_LineFile%\..\..\lib\Net.ahk
 
 gPass := 0
 gFail := 0
@@ -368,7 +369,7 @@ No("HasValue on an empty list", HasValue([], "a"))
 Group("Config - schema")
 
 spec := ConfigSpec()
-Eq("sixteen settings", spec.Count, 16)
+Eq("eighteen settings", spec.Count, 18)
 for key, def in spec {
     Yes(key " declares a section", def[1] != "")
     Yes(key " sits in a known section", HasValue(["Audio", "Engine", "Paths", "UI"], def[1]))
@@ -425,11 +426,202 @@ No("empty is not a tier", IsValidTier(""))
 Yes("idle is a policy", IsValidPolicy("idle"))
 Yes("resident is a policy", IsValidPolicy("resident"))
 Yes("never is a policy", IsValidPolicy("never"))
+
+Yes("update checking is a stored setting", spec.Has("CheckUpdates"))
+Yes("whether setup has run is a stored setting", spec.Has("Configured"))
+Eq("update checking is on by default", spec["CheckUpdates"][2], "1")
+; A fresh install has not been through setup. An upgrade is recognised by
+; its existing microphone instead, so it is not sent back through it.
+Eq("setup has not run by default", spec["Configured"][2], "0")
+Eq("both are UI settings", spec["CheckUpdates"][1], "UI")
 No("sometimes is not a policy", IsValidPolicy("sometimes"))
 
 Eq("one second of 16 kHz mono 16-bit is 32000 bytes", RawBytesToSeconds(32000), 1)
 Eq("half a second", RawBytesToSeconds(16000), 0.5)
 Eq("an empty capture is zero seconds", RawBytesToSeconds(0), 0)
+
+; =====================================================================
+Group("Net - certutil output")
+
+; Real output from this project's own machine. The words around the hash
+; are translated by Windows; the hash is not.
+FRENCH := "Hachage SHA256 de D:\x\versions.json :`r`n"
+        . "e60abb78b5189b59bfcee190b3334480b9d0af58e834fa78cd4853dca65f828a`r`n"
+        . "CertUtil: -hashfile La commande s'est terminee correctement.`r`n"
+ENGLISH := "SHA256 hash of D:\x\versions.json:`r`n"
+         . "E60ABB78B5189B59BFCEE190B3334480B9D0AF58E834FA78CD4853DCA65F828A`r`n"
+         . "CertUtil: -hashfile command completed successfully.`r`n"
+
+Eq("a localised certutil report still yields the hash", ParseCertutilHash(FRENCH),
+   "e60abb78b5189b59bfcee190b3334480b9d0af58e834fa78cd4853dca65f828a")
+Eq("an English report yields the same hash, lower-cased", ParseCertutilHash(ENGLISH),
+   "e60abb78b5189b59bfcee190b3334480b9d0af58e834fa78cd4853dca65f828a")
+Eq("space-separated pairs are still one hash",
+   ParseCertutilHash("hash:`r`ne6 0a bb 78 b5 18 9b 59 bf ce e1 90 b3 33 44 80 "
+                   . "b9 d0 af 58 e8 34 fa 78 cd 48 53 dc a6 5f 82 8a`r`n"),
+   "e60abb78b5189b59bfcee190b3334480b9d0af58e834fa78cd4853dca65f828a")
+Eq("no hash in the text is no hash", ParseCertutilHash("CertUtil: access denied."), "")
+Eq("an empty report is no hash", ParseCertutilHash(""), "")
+
+Group("Net - hash comparison")
+
+H := "e60abb78b5189b59bfcee190b3334480b9d0af58e834fa78cd4853dca65f828a"
+Yes("identical hashes match", HashMatches(H, H))
+Yes("case does not matter", HashMatches(StrUpper(H), H))
+Yes("surrounding whitespace does not matter", HashMatches(" " H " ", H))
+No("a different hash does not match", HashMatches(H, StrReplace(H, "e6", "e7")))
+; The failure that must never be silent: an absent expected hash would
+; otherwise make every download acceptable.
+No("an empty expected hash never matches", HashMatches("", H))
+No("an empty actual hash never matches", HashMatches(H, ""))
+No("a truncated expected hash never matches", HashMatches(SubStr(H, 1, 32), H))
+No("a non-hex expected hash never matches", HashMatches(StrReplace(H, "e", "z"), H))
+
+Group("Net - version comparison")
+
+Eq("a leading v is not part of the version", NormalizeVersion("v2.1.0"), "2.1.0")
+Eq("an uppercase V too", NormalizeVersion("V2.1.0"), "2.1.0")
+Eq("a bare version is unchanged", NormalizeVersion("2.1.0"), "2.1.0")
+
+Eq("equal versions compare equal", CompareVersions("2.0.0", "2.0.0"), 0)
+Eq("a tag and a bare version compare equal", CompareVersions("v2.0.0", "2.0.0"), 0)
+Eq("2.1.0 is above 2.0.9", CompareVersions("2.1.0", "2.0.9"), 1)
+; Field-by-field, as numbers. A string comparison puts 2.10.0 below
+; 2.9.0, which would stop offering updates after the ninth release.
+Eq("2.10.0 is above 2.9.0", CompareVersions("2.10.0", "2.9.0"), 1)
+Eq("2.0 equals 2.0.0", CompareVersions("2.0", "2.0.0"), 0)
+Eq("3.0 is above 2.99.99", CompareVersions("3.0", "2.99.99"), 1)
+
+Yes("a higher version is newer", IsNewerVersion("2.0.0", "2.0.1"))
+Yes("a tagged higher version is newer", IsNewerVersion("2.0.0", "v3.0.0"))
+No("the same version is not newer", IsNewerVersion("2.0.0", "2.0.0"))
+No("an older version is not newer", IsNewerVersion("2.0.0", "1.9.9"))
+; A mangled or hostile response must not be able to push an update.
+No("an empty candidate is not newer", IsNewerVersion("2.0.0", ""))
+No("a non-numeric candidate is not newer", IsNewerVersion("2.0.0", "latest"))
+No("a candidate with a suffix is not newer", IsNewerVersion("2.0.0", "9.9.9-evil"))
+No("an unknown current version accepts nothing", IsNewerVersion("", "9.9.9"))
+
+Group("Net - release metadata")
+
+; Trimmed from a real api.github.com response, keeping the field order
+; and a second asset, because pairing one asset's name with another
+; asset's URL is the mistake this shape invites.
+REL := '{"tag_name":"v2.1.0","draft":false,"prerelease":false,"assets":['
+     . '{"name":"Whispers-2.1.0-portable.zip","size":12,'
+     . '"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111",'
+     . '"browser_download_url":"https://github.com/o/r/releases/download/v2.1.0/Whispers-2.1.0-portable.zip"},'
+     . '{"name":"Whispers-2.1.0-setup.exe","size":34,'
+     . '"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222",'
+     . '"browser_download_url":"https://github.com/o/r/releases/download/v2.1.0/Whispers-2.1.0-setup.exe"}]}'
+
+Eq("the tag is read", ReleaseTagFrom(REL), "v2.1.0")
+Eq("an empty document has no tag", ReleaseTagFrom(""), "")
+Yes("a normal release is published", IsPublishedRelease(REL))
+No("a draft is not published", IsPublishedRelease(StrReplace(REL, '"draft":false', '"draft":true')))
+No("a pre-release is not published", IsPublishedRelease(StrReplace(REL, '"prerelease":false', '"prerelease":true')))
+No("an empty document is not a release", IsPublishedRelease(""))
+
+asset := ReleaseAssetFrom(REL, "-setup.exe")
+Eq("the asset is selected by suffix", asset["name"], "Whispers-2.1.0-setup.exe")
+Eq("it carries its OWN url", asset["url"],
+   "https://github.com/o/r/releases/download/v2.1.0/Whispers-2.1.0-setup.exe")
+Eq("it carries its OWN digest, not the previous asset's", asset["sha256"],
+   "2222222222222222222222222222222222222222222222222222222222222222")
+
+zipAsset := ReleaseAssetFrom(REL, ".zip")
+Eq("a different suffix selects a different asset", zipAsset["name"], "Whispers-2.1.0-portable.zip")
+Eq("with that asset's digest", zipAsset["sha256"],
+   "1111111111111111111111111111111111111111111111111111111111111111")
+
+Eq("an unknown suffix selects nothing", ReleaseAssetFrom(REL, ".msi")["url"], "")
+Eq("an empty document selects nothing", ReleaseAssetFrom("", "-setup.exe")["url"], "")
+Eq("an empty suffix selects nothing", ReleaseAssetFrom(REL, "")["url"], "")
+; An asset published without a digest must not borrow the next one's.
+Eq("an asset with no digest is not half-matched",
+   ReleaseAssetFrom('{"name":"a-setup.exe","browser_download_url":"https://x/y"}', "-setup.exe")["url"], "")
+
+Group("Net - release API URL")
+
+Eq("a well-formed repository yields the releases endpoint", ReleaseApiUrl("mmmansouri/whispers"),
+   "https://api.github.com/repos/mmmansouri/whispers/releases/latest")
+Eq("an empty repository yields no URL", ReleaseApiUrl(""), "")
+Eq("a bare name yields no URL", ReleaseApiUrl("whispers"), "")
+; The repository name is interpolated into a URL, so anything that could
+; redirect the request elsewhere has to be refused outright.
+Eq("a path traversal yields no URL", ReleaseApiUrl("../../evil"), "")
+Eq("an absolute URL yields no URL", ReleaseApiUrl("https://evil.example/x"), "")
+Eq("a query string yields no URL", ReleaseApiUrl("o/r?x=1"), "")
+Eq("an at-sign host yields no URL", ReleaseApiUrl("o/r@evil.example"), "")
+
+Group("Net - the shipped versions.json")
+
+NJ := FileRead(A_ScriptDir "\..\versions.json", "UTF-8")
+
+Eq("the update repository is read from the updates block", UpdateRepoFrom(NJ), "mmmansouri/whispers")
+Eq("the update asset suffix is read", UpdateAssetSuffixFrom(NJ), "-setup.exe")
+; The engine block has a "repo" key too. An unscoped search would send
+; the update check to whisper.cpp's releases - the same class of mistake
+; the tier lookup made before it was anchored on its own block.
+Lacks("the update repository is never the engine's", UpdateRepoFrom(NJ), "whisper.cpp")
+Eq("a document with no updates block disables update checking",
+   UpdateRepoFrom('{"engine":{"repo":"ggml-org/whisper.cpp"}}'), "")
+
+; The scoping helper the two readers above are built on.
+TWO := '{"engine":{"repo":"ggml-org/whisper.cpp"},"updates":{"repo":"me/mine"}}'
+Has("a block is read by its own key", JsonBlock(TWO, "updates"), '"repo":"me/mine"')
+Lacks("and stops at that block's closing brace", JsonBlock(TWO, "updates"), "ggml-org")
+Has("an earlier block is read by its own key too", JsonBlock(TWO, "engine"), "ggml-org")
+Eq("an absent key yields nothing", JsonBlock(TWO, "nope"), "")
+Eq("an empty key yields nothing", JsonBlock(TWO, ""), "")
+Eq("an empty document yields nothing", JsonBlock("", "updates"), "")
+; A key whose value is not an object is not a block.
+Eq("a scalar is not a block", JsonBlock('{"whispers":"2.0.0"}', "whispers"), "")
+Eq("an empty document disables update checking", UpdateRepoFrom(""), "")
+
+Eq("the cpu model URL points at the pinned revision", ModelUrlFrom(NJ, "cpu"),
+   "https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+   . "5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.bin")
+Has("the max model URL names its own file", ModelUrlFrom(NJ, "max"), "ggml-large-v3.bin")
+Eq("an unknown tier has no model URL", ModelUrlFrom(NJ, "nope"), "")
+Eq("an empty document has no model URL", ModelUrlFrom("", "cpu"), "")
+Eq("the cpu model hash is the pinned one", ModelShaFrom(NJ, "cpu"),
+   "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b")
+Eq("an unknown tier has no hash", ModelShaFrom(NJ, "nope"), "")
+Eq("the cpu model size is the pinned one", ModelSizeFrom(NJ, "cpu"), 487601967)
+; Only ever a divisor for a progress bar, so it degrades to 0 rather than
+; throwing and taking the download down with it.
+Eq("an unknown tier has size zero", ModelSizeFrom(NJ, "nope"), 0)
+Eq("an empty document has size zero", ModelSizeFrom("", "cpu"), 0)
+
+Group("Commands - downloads")
+
+f := CmdFetch("C:\w\curl.exe", "https://h/f.bin", "C:\t\a b.bin", "C:\t\d.log")
+Has("the destination is quoted", f, '-o "C:\t\a b.bin"')
+Has("the url is quoted", f, '"https://h/f.bin"')
+Has("redirects are followed", f, " -L ")
+; Without --fail, curl writes the HTTP error page to the destination and
+; the caller hashes a page of HTML instead of a model.
+Has("an HTTP error is a failure, not a file", f, "--fail")
+Has("an interrupted multi-gigabyte download resumes", f, "-C -")
+; curl writes its own stderr rather than a shell doing it, because this
+; builder is launched directly: wrapped in cmd.exe the process id would
+; be cmd's, and Cancel would leave curl running and still writing.
+Has("curl writes its own stderr to the log", f, '--stderr "C:\t\d.log"')
+Lacks("no shell redirection, so the process id is curl's", f, "2>")
+
+j := CmdFetchJson("C:\w\curl.exe", "https://api.github.com/x", "C:\t\r.json", "C:\t\d.log")
+Has("the API request asks for the versioned media type", j, "Accept: application/vnd.github+json")
+Has("the API request cannot hang", j, "--max-time 20")
+Has("its stderr goes to the log too", j, '--stderr "C:\t\d.log"')
+; The update check must never carry anything about the user.
+Lacks("no cookie is sent", j, "-b ")
+Lacks("no credentials are sent", j, "-u ")
+
+h := CmdHashFile("C:\t\a b.bin", "C:\t\h.log")
+Has("the file to hash is quoted", h, '"C:\t\a b.bin"')
+Has("SHA-256 is requested explicitly", h, " SHA256")
+Has("both streams go to the log", h, '> "C:\t\h.log" 2>&1')
 
 ; =====================================================================
 Report()

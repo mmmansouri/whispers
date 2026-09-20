@@ -8,6 +8,7 @@
 #Include %A_LineFile%\..\lib\Tiers.ahk
 #Include %A_LineFile%\..\lib\Devices.ahk
 #Include %A_LineFile%\..\lib\Commands.ahk
+#Include %A_LineFile%\..\lib\Net.ahk
 
 ; =====================================================================
 ; Whispers - push-to-talk dictation powered by whisper.cpp
@@ -99,6 +100,12 @@ gLogView     := ""
 gInd         := ""
 gIndText     := ""
 gGpu         := ""
+gUpdate      := ""      ; Map(tag,url,sha256,name) once one is found
+gDlCancel    := false
+gWizard      := ""
+gWizCtl      := ""
+gWizEcho     := false
+gFirstRun    := false
 
 ; === Bootstrap ===
 try DirCreate(DATA_DIR)
@@ -117,6 +124,12 @@ if ProcessExist("whisper-server.exe")
     RunWait("taskkill /IM whisper-server.exe /F",, "Hide")
 
 LoadConfig()
+
+; Captured before microphone detection runs, because detection fills Mic
+; in. An upgrade from a working installation must not be greeted by a
+; setup window; a genuinely new install must not miss it.
+gFirstRun := (!Cfg["Configured"] && Cfg["Mic"] = "")
+
 ResolvePaths()
 CreateIndicator()
 LoadHistory()
@@ -166,6 +179,15 @@ SetState("idle")
 if (Cfg["PlaySounds"])
     SoundBeep(800, 100)
 Toast(APP_NAME " ready - hold " Cfg["Hotkey"], 2500)
+
+if (gFirstRun) {
+    LogMsg("INFO", "First run - showing the setup window")
+    ShowFirstRun()
+}
+
+; Deferred, so a slow or unreachable network cannot delay startup, and
+; one-shot (negative period), so it never runs again in this session.
+SetTimer(CheckForUpdate, -8000)
 
 LoadConfig() {
     global Cfg, INI_FILE
@@ -258,6 +280,24 @@ ModelPath() {
     global MODELS_DIR, Cfg
     f := TierFile(Cfg["Tier"])
     return f = "" ? "" : MODELS_DIR "\" f
+}
+
+ModelPathFor(tier) {
+    global MODELS_DIR
+    f := TierFile(tier)
+    return f = "" ? "" : MODELS_DIR "\" f
+}
+
+ModelUrl(tier) {
+    return ModelUrlFrom(VerRead(), tier)
+}
+
+ModelSha(tier) {
+    return ModelShaFrom(VerRead(), tier)
+}
+
+ModelSize(tier) {
+    return ModelSizeFrom(VerRead(), tier)
 }
 
 ; =====================================================================
@@ -821,7 +861,21 @@ TranscribeViaCli(forceCpu) {
 }
 
 DeliverText(text) {
-    global Cfg
+    global Cfg, gWizEcho, gWizCtl
+
+    ; While the setup window is open the transcription is shown there and
+    ; goes nowhere else. The user is testing their microphone, not
+    ; dictating into whatever window happens to be behind it.
+    if (gWizEcho) {
+        try gWizCtl["Heard"].Value := text
+        AddHistory(text)
+        if (Cfg["PlaySounds"])
+            SoundBeep(1000, 60)
+        IndSet("Done", "1E7A1E")
+        SetTimer(IndHide, -900)
+        SetState(gPausedState())
+        return
+    }
 
     A_Clipboard := ""
     A_Clipboard := text
@@ -844,6 +898,243 @@ DeliverText(text) {
     SetTimer(IndHide, -900)
     Toast(Cfg["AutoPaste"] ? "Pasted: " preview : "Copied: " preview, 2200)
     SetState(gPausedState())
+}
+
+; =====================================================================
+; Downloads
+;
+; Everything fetched after installation goes through FetchVerified, and
+; it holds one rule: nothing is ever written to its final name until its
+; SHA-256 matches what was expected.
+;
+; The download lands on a .part file. A half-written model that looks
+; installed is worse than no model at all - it fails at the first key
+; press, with an error about the engine rather than about the download.
+; =====================================================================
+FetchVerified(url, destPath, expectedSha, label, approxBytes := 0) {
+    global CURL_EXE, TEMP_DIR, gBusy, gDlCancel
+
+    if (url = "") {
+        Fail("Cannot fetch " label, "No download URL - versions.json may be damaged.")
+        return false
+    }
+    ; Refusing here rather than downloading something unverifiable is the
+    ; whole point: an empty expected hash would make any response valid.
+    if (expectedSha = "") {
+        Fail("Cannot fetch " label, "No expected SHA-256 - refusing an unverifiable download.")
+        return false
+    }
+
+    part := destPath ".part"
+    dlog := TEMP_DIR "\download.log"
+    hlog := TEMP_DIR "\hash.log"
+    try DirCreate(RegExReplace(destPath, "\\[^\\]+$", ""))
+    try FileDelete(dlog)
+
+    LogMsg("INFO", "Fetching " label " -> " url)
+    gBusy := true
+    gDlCancel := false
+    ui := DlWindow(label)
+
+    pid := 0
+    try {
+        Run(CmdFetch(CURL_EXE, url, part, dlog), TEMP_DIR, "Hide", &pid)
+    } catch as e {
+        DlClose(ui)
+        gBusy := false
+        Fail("Cannot start the download", e.Message)
+        return false
+    }
+
+    while ProcessExist(pid) {
+        Sleep(250)
+        if (gDlCancel) {
+            try ProcessClose(pid)
+            Sleep(300)
+            DlClose(ui)
+            gBusy := false
+            LogMsg("INFO", "Download cancelled by the user: " label)
+            Toast("Download cancelled", 2000)
+            return false
+        }
+        DlProgress(ui, FileExist(part) ? FileGetSize(part) : 0, approxBytes)
+    }
+
+    DlProgress(ui, FileExist(part) ? FileGetSize(part) : 0, approxBytes)
+    DlSay(ui, "Verifying...")
+
+    if !FileExist(part) {
+        DlClose(ui)
+        gBusy := false
+        Fail("Download failed: " label, TailText(TailFile(dlog, 600), 200))
+        return false
+    }
+
+    ; The hash is checked whatever curl's exit code was. A resumed
+    ; download can end on an HTTP 416 - "you already have all of it" -
+    ; which is an error to curl and a success to us.
+    try FileDelete(hlog)
+    RunWait(ShellCmd(CmdHashFile(part, hlog)), TEMP_DIR, "Hide")
+    actual := ""
+    try actual := ParseCertutilHash(FileRead(hlog))
+
+    if !HashMatches(expectedSha, actual) {
+        try FileDelete(part)
+        DlClose(ui)
+        gBusy := false
+        LogMsg("ERROR", "SHA-256 mismatch for " label ": expected " expectedSha ", got " (actual = "" ? "nothing" : actual))
+        Fail("Download rejected: " label, "The file does not match its expected SHA-256 and was deleted.")
+        return false
+    }
+
+    try FileDelete(destPath)
+    try FileMove(part, destPath, 1)
+    DlClose(ui)
+    gBusy := false
+    LogMsg("INFO", "Fetched and verified " label " -> " destPath)
+    return FileExist(destPath) ? true : false
+}
+
+DlWindow(label) {
+    global APP_NAME
+    g := Gui("+AlwaysOnTop -MinimizeBox -MaximizeBox", APP_NAME " - downloading")
+    g.SetFont("s9", "Segoe UI")
+    g.Add("Text", "xm w430", label)
+    pbar := g.Add("Progress", "xm y+8 w430 h18 Range0-1000")
+    info := g.Add("Text", "xm y+8 w430", "Starting...")
+    g.Add("Button", "xm y+10 w110", "Cancel").OnEvent("Click", (*) => CancelDownload())
+    g.OnEvent("Close", (*) => CancelDownload())
+    g.Show()
+    return Map("gui", g, "bar", pbar, "info", info)
+}
+
+CancelDownload() {
+    global gDlCancel
+    gDlCancel := true
+}
+
+DlSay(ui, msg) {
+    try ui["info"].Value := msg
+}
+
+DlProgress(ui, got, total) {
+    mb := Round(got / 1048576)
+    if (total > 0) {
+        pos := Round(got / total * 1000)
+        try ui["bar"].Value := pos > 1000 ? 1000 : pos
+        DlSay(ui, mb " of " Round(total / 1048576) " MB")
+    } else {
+        DlSay(ui, mb " MB")
+    }
+}
+
+DlClose(ui) {
+    try ui["gui"].Destroy()
+}
+
+; True when the tier's model is on disk, fetching it first if the user
+; agrees. This is what makes switching tier in the settings window a
+; complete action rather than advice to go and find a file.
+EnsureModelInstalled(tier, ask := true) {
+    global APP_NAME
+    file := TierFile(tier)
+    if (file = "")
+        return false
+    path := ModelPathFor(tier)
+    if FileExist(path)
+        return true
+
+    size := ModelSize(tier)
+    mb := size > 0 ? " (" Round(size / 1048576) " MB)" : ""
+    if (ask) {
+        if (MsgBox("The '" tier "' tier needs " file mb ", which is not installed.`n`n"
+                 . "Download it now?", APP_NAME, "YesNo Icon?") != "Yes")
+            return false
+    }
+    return FetchVerified(ModelUrl(tier), path, ModelSha(tier), "Model " file, size)
+}
+
+; =====================================================================
+; Updates
+;
+; Checked once at startup, never installed without a click. What the
+; check sends is a plain GET to the GitHub releases API: no identifier,
+; no configuration, nothing about the machine.
+;
+; The hash used here is NOT a pin. A release that does not exist yet
+; cannot have its hash written into versions.json, so the digest comes
+; from the same API response as the URL. It proves the download arrived
+; intact; it does not prove who built it. README.md says so in the same
+; words.
+; =====================================================================
+CheckForUpdate(*) {
+    global Cfg, TEMP_DIR, CURL_EXE, APP_VERSION, gUpdate
+
+    if (!Cfg["CheckUpdates"]) {
+        LogMsg("INFO", "Update check skipped: turned off in settings")
+        return
+    }
+    api := ReleaseApiUrl(UpdateRepoFrom(VerRead()))
+    if (api = "") {
+        LogMsg("INFO", "Update check skipped: versions.json names no repository")
+        return
+    }
+
+    dest := TEMP_DIR "\release.json"
+    dlog := TEMP_DIR "\release.log"
+    try FileDelete(dest)
+    RunWait(ShellCmd(CmdFetchJson(CURL_EXE, api, dest, dlog)), TEMP_DIR, "Hide")
+    if !FileExist(dest) {
+        LogMsg("INFO", "Update check: no answer from " api)
+        return
+    }
+
+    json := ""
+    try json := FileRead(dest, "UTF-8")
+    if !IsPublishedRelease(json) {
+        LogMsg("INFO", "Update check: no published release")
+        return
+    }
+
+    tag := ReleaseTagFrom(json)
+    if !IsNewerVersion(APP_VERSION, tag) {
+        LogMsg("INFO", "Up to date (" APP_VERSION ", latest published is " tag ")")
+        return
+    }
+
+    asset := ReleaseAssetFrom(json, UpdateAssetSuffixFrom(VerRead()))
+    if (asset["url"] = "" || asset["sha256"] = "") {
+        LogMsg("WARN", "Release " tag " has no installer asset with a digest - not offering it")
+        return
+    }
+
+    gUpdate := Map("tag", NormalizeVersion(tag), "url", asset["url"],
+                   "sha256", asset["sha256"], "name", asset["name"])
+    LogMsg("INFO", "Update available: " tag " (" asset["name"] ")")
+    BuildTray()
+    Toast("Whispers " NormalizeVersion(tag) " is available - see the tray menu", 6000)
+}
+
+InstallUpdate(*) {
+    global gUpdate, TEMP_DIR, APP_NAME, APP_VERSION
+    if !IsObject(gUpdate)
+        return
+
+    dest := TEMP_DIR "\" gUpdate["name"]
+    if !FetchVerified(gUpdate["url"], dest, gUpdate["sha256"],
+                      "Whispers " gUpdate["tag"] " installer", 0)
+        return
+
+    if (MsgBox("Whispers " gUpdate["tag"] " has been downloaded and its checksum matches.`n`n"
+             . APP_NAME " will now close and the installer will start.`n"
+             . "Your settings, history and model are kept.", APP_NAME, "OKCancel Icon?") != "OK") {
+        LogMsg("INFO", "Update downloaded but not installed - user cancelled")
+        return
+    }
+
+    LogMsg("INFO", "Installing update " gUpdate["tag"] " from " dest)
+    try Run('"' dest '"')
+    ExitApp()
 }
 
 ; =====================================================================
@@ -992,9 +1283,16 @@ TogglePause(*) {
 ; Tray menu
 ; =====================================================================
 BuildTray() {
-    global gPaused
+    global gPaused, gUpdate
     m := A_TrayMenu
     m.Delete()
+    ; An available update goes first and is the default action: it is the
+    ; only entry that is not there all the time, so burying it would make
+    ; the check pointless.
+    if IsObject(gUpdate) {
+        m.Add("Install Whispers " gUpdate["tag"] "...", InstallUpdate)
+        m.Add()
+    }
     m.Add("Settings...", (*) => ShowSettings())
     m.Add(gPaused ? "Resume dictation" : "Pause dictation", TogglePause)
     m.Add()
@@ -1002,10 +1300,11 @@ BuildTray() {
     m.Add("Log...", (*) => ShowSettings(4))
     m.Add()
     m.Add(ServerAlive() ? "Unload model (free VRAM)" : "Preload model", ToggleServer)
+    m.Add("Run setup again...", (*) => ShowFirstRun())
     m.Add("Reload script", (*) => Reload())
     m.Add()
     m.Add("Exit", (*) => ExitApp())
-    m.Default := "Settings..."
+    m.Default := IsObject(gUpdate) ? "Install Whispers " gUpdate["tag"] "..." : "Settings..."
 }
 
 ToggleServer(*) {
@@ -1095,6 +1394,8 @@ ShowSettings(startTab := 1) {
     gCtl["TrimSilence"].Value := Cfg["TrimSilence"]
     gCtl["Autostart"] := g.Add("CheckBox", "xm+16 y+8", "Start with Windows")
     gCtl["Autostart"].Value := IsAutostart()
+    gCtl["CheckUpdates"] := g.Add("CheckBox", "xm+16 y+8", "Check for a new version at startup")
+    gCtl["CheckUpdates"].Value := Cfg["CheckUpdates"]
 
     ; ---------- Engine ----------
     tab.UseTab(2)
@@ -1128,6 +1429,7 @@ ShowSettings(startTab := 1) {
 
     gCtl["Status"] := g.Add("Text", "xm+16 y+16 w600", "")
     g.Add("Button", "xm+16 y+6 w160", "Refresh status").OnEvent("Click", (*) => RefreshStatus())
+    g.Add("Button", "x+10 yp w180", "Download selected model").OnEvent("Click", GetModelClick)
 
     ; ---------- History ----------
     tab.UseTab(3)
@@ -1281,6 +1583,7 @@ SaveSettings(btn, *) {
     Cfg["PlaySounds"] := gCtl["PlaySounds"].Value
     Cfg["ShowIndicator"] := gCtl["ShowIndicator"].Value
     Cfg["TrimSilence"] := gCtl["TrimSilence"].Value
+    Cfg["CheckUpdates"] := gCtl["CheckUpdates"].Value
 
     Cfg["Tier"] := SelectedTier()
     Cfg["VramPolicy"] := gCtl["VramPolicy"].Text
@@ -1315,17 +1618,156 @@ SaveSettings(btn, *) {
         StopServer("policy set to never")
 
     ; Changing tier without the matching model installed is the one setting
-    ; that can leave Whispers unable to transcribe, so say so immediately
-    ; instead of failing at the next key press.
-    if !FileExist(ModelPath()) {
-        MsgBox("Tier '" Cfg["Tier"] "' needs " TierFile(Cfg["Tier"]) ", which is not installed yet.`n`n"
-             . "Dictation will fail until that model is fetched.", "Whispers", "Icon!")
-    }
+    ; that can leave Whispers unable to transcribe. Offering the download
+    ; here is what makes switching tier a complete action rather than a
+    ; warning telling the user to go and find a file.
+    if !FileExist(ModelPath())
+        EnsureModelInstalled(Cfg["Tier"], true)
 
     BuildTray()
     SetState(gPausedState())
     RefreshStatus()
     Toast("Settings saved", 1800)
+}
+
+; =====================================================================
+; Setup window
+;
+; Shown once, on a genuinely new installation, and reachable from the
+; tray afterwards. It ends on a real dictation through the real pipeline
+; - microphone, ffmpeg, server, model - rather than on a claim that
+; everything is configured.
+;
+; While it is open, transcriptions are echoed into it and pasted
+; nowhere: someone testing their microphone has some other window behind
+; this one, and it is not a place to drop text.
+; =====================================================================
+ShowFirstRun() {
+    global gWizard, gWizCtl, gWizEcho, Cfg, APP_NAME, APP_VERSION
+
+    if (gWizard) {
+        try {
+            gWizEcho := true
+            WizRefreshModel()
+            gWizard.Show()
+            return
+        }
+    }
+
+    g := Gui("+AlwaysOnTop", APP_NAME " " APP_VERSION " - setup")
+    g.SetFont("s9", "Segoe UI")
+    gWizard := g
+    gWizCtl := Map()
+
+    g.SetFont("s11 Bold")
+    g.Add("Text", "xm w520", "Let's check that dictation works.")
+    g.SetFont("s9 Norm")
+
+    g.Add("Text", "xm y+14 w520", "1.  Microphone")
+    devices := GetAudioDevices()
+    if (devices.Length = 0)
+        devices := [Cfg["Mic"]]
+    if (Cfg["Mic"] != "" && !HasValue(devices, Cfg["Mic"]))
+        devices.InsertAt(1, Cfg["Mic"])
+    gWizCtl["Mic"] := g.Add("DropDownList", "xm+20 y+6 w500", devices)
+    if (Cfg["Mic"] != "")
+        gWizCtl["Mic"].Text := Cfg["Mic"]
+    g.Add("Button", "xm+20 y+8 w150", "Say a sentence").OnEvent("Click", WizTestMic)
+    gWizCtl["MicResult"] := g.Add("Text", "x+10 yp+4 w330", "Records 3 seconds and reports the level.")
+
+    g.Add("Text", "xm y+16 w520", "2.  Hotkey and language")
+    gWizCtl["Hotkey"] := g.Add("Hotkey", "xm+20 y+6 w120")
+    gWizCtl["Hotkey"].Value := Cfg["Hotkey"]
+    gWizCtl["Language"] := g.Add("DropDownList", "x+10 yp w80", ["fr", "en", "auto"])
+    gWizCtl["Language"].Text := Cfg["Language"]
+    g.Add("Text", "x+10 yp+4 w280", "Hold the key, speak, release.")
+
+    g.Add("Text", "xm y+16 w520", "3.  Model")
+    gWizCtl["Model"] := g.Add("Text", "xm+20 y+8 w320", "")
+    gWizCtl["GetModel"] := g.Add("Button", "x+10 yp-4 w160", "Download model")
+    gWizCtl["GetModel"].OnEvent("Click", WizGetModel)
+
+    g.Add("Text", "xm y+16 w520", "4.  Try it - hold the hotkey and say a sentence")
+    gWizCtl["Heard"] := g.Add("Edit", "xm+20 y+6 w500 h70 ReadOnly -Wrap +HScroll")
+    g.Add("Text", "xm+20 y+6 w500", "What you dictate appears here and is pasted nowhere.")
+
+    g.Add("Button", "xm+420 y+16 w100 Default", "Finish").OnEvent("Click", WizFinish)
+    g.OnEvent("Close", (*) => WizFinish(0))
+    g.OnEvent("Escape", (*) => WizFinish(0))
+
+    WizRefreshModel()
+    gWizEcho := true
+    g.Show("w560")
+}
+
+WizTestMic(btn, *) {
+    global gWizCtl, gBusy
+    device := gWizCtl["Mic"].Text
+    if (device = "") {
+        try gWizCtl["MicResult"].Value := "Pick a microphone first."
+        return
+    }
+    try btn.Enabled := false
+    try gWizCtl["MicResult"].Value := "Listening for 3 seconds - say something..."
+    gBusy := true
+    level := MicLevel(device, 3)
+    gBusy := false
+    try btn.Enabled := true
+
+    if (level = "") {
+        try gWizCtl["MicResult"].Value := "Nothing was captured. Try another device."
+        return
+    }
+    try gWizCtl["MicResult"].Value := IsSilentLevel(level)
+        ? "Heard " Round(level, 1) " dB - that is silence."
+        : "Heard " Round(level, 1) " dB - that works."
+}
+
+WizGetModel(btn, *) {
+    global Cfg
+    EnsureModelInstalled(Cfg["Tier"], true)
+    WizRefreshModel()
+}
+
+WizRefreshModel() {
+    global gWizCtl, Cfg
+    if !IsObject(gWizCtl) || !gWizCtl.Has("Model")
+        return
+    file := TierFile(Cfg["Tier"])
+    if (file = "") {
+        try gWizCtl["Model"].Value := "versions.json is missing or damaged."
+        try gWizCtl["GetModel"].Enabled := false
+        return
+    }
+    installed := FileExist(ModelPathFor(Cfg["Tier"])) ? true : false
+    try gWizCtl["Model"].Value := (installed ? "Installed: " : "Not installed: ") file
+    try gWizCtl["GetModel"].Enabled := !installed
+}
+
+WizFinish(btn, *) {
+    global gWizard, gWizCtl, gWizEcho, Cfg, gCurHotkey
+    Cfg["Mic"] := gWizCtl["Mic"].Text
+    Cfg["Language"] := gWizCtl["Language"].Text
+
+    key := gWizCtl["Hotkey"].Value
+    if (key != "" && key != gCurHotkey)
+        ApplyHotkey(key)
+    Cfg["Hotkey"] := gCurHotkey
+
+    Cfg["Configured"] := 1
+    SaveConfig()
+    LogMsg("INFO", "Setup finished: mic=" Cfg["Mic"] " hotkey=" Cfg["Hotkey"] " lang=" Cfg["Language"])
+
+    gWizEcho := false
+    try gWizard.Hide()
+    BuildTray()
+    SetState(gPausedState())
+    Toast("Setup done - hold " gCurHotkey " to dictate", 3000)
+}
+
+GetModelClick(btn, *) {
+    EnsureModelInstalled(SelectedTier(), true)
+    RefreshStatus()
 }
 
 ; =====================================================================
@@ -1340,13 +1782,21 @@ IsAutostart() {
     return FileExist(ShortcutPath()) ? 1 : 0
 }
 
+; The shortcut points at the interpreter that is running this script,
+; with the script as its argument - NOT at the .ahk file.
+;
+; A shortcut to the .ahk only works where Windows has an association for
+; that extension, which means where AutoHotkey was installed system-wide.
+; Whispers ships its own interpreter beside the script and installs
+; nothing system-wide, so on an installed machine a .ahk shortcut is a
+; file that opens in Notepad, or in nothing at all.
 SetAutostart(enable) {
     lnk := ShortcutPath()
     if (enable) {
         if !FileExist(lnk) {
             try {
-                FileCreateShortcut(A_ScriptFullPath, lnk, A_ScriptDir)
-                LogMsg("INFO", "Autostart enabled")
+                FileCreateShortcut(A_AhkPath, lnk, A_ScriptDir, '"' A_ScriptFullPath '"')
+                LogMsg("INFO", "Autostart enabled -> " A_AhkPath)
             } catch as e {
                 LogMsg("ERROR", "Autostart shortcut failed: " e.Message)
             }

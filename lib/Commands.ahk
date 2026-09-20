@@ -96,6 +96,48 @@ CmdServerAlive(curlExe, port) {
     return '"' curlExe '" -s -o nul --max-time 2 http://127.0.0.1:' port '/'
 }
 
+; --- downloads --------------------------------------------------------
+
+; The two builders below are the ONE exception to the cmd.exe contract
+; above: they are launched directly, and they use curl's own --stderr
+; instead of a shell redirection.
+;
+; The reason is Cancel. Wrapped in cmd.exe, the process id handed back is
+; cmd's, and killing it leaves curl running - still writing, still
+; holding the file. Launched directly, the id is curl's and Cancel means
+; what it says.
+;
+; A download that resumes rather than restarting: a 2.9 GB model over a
+; hotel connection will be interrupted, and starting again from zero is
+; how a user gives up. -C - continues from whatever is already on disk.
+; Resuming onto a corrupted part file is safe here because the caller
+; hashes the result and deletes it when it does not match, so the next
+; attempt starts clean.
+;
+; --fail makes curl return non-zero on an HTTP error instead of writing
+; the error page to the destination, which would otherwise be hashed as
+; if it were a model.
+CmdFetch(curlExe, url, destPath, logPath) {
+    return '"' curlExe '" -L --fail --retry 3 --retry-delay 2 -C - --progress-bar'
+         . ' --stderr "' logPath '"'
+         . ' -o "' destPath '" "' url '"'
+}
+
+; The releases API. No credentials and no user data are sent: the only
+; header is the one GitHub requires to serve the versioned JSON.
+CmdFetchJson(curlExe, url, destPath, logPath) {
+    return '"' curlExe '" -L --fail --max-time 20 -H "Accept: application/vnd.github+json"'
+         . ' --stderr "' logPath '"'
+         . ' -o "' destPath '" "' url '"'
+}
+
+; certutil ships with Windows, so hashing needs nothing installed. Its
+; surrounding text is localised; ParseCertutilHash in lib\Net.ahk reads
+; the digits rather than the words.
+CmdHashFile(filePath, logPath) {
+    return 'certutil -hashfile "' filePath '" SHA256 > "' logPath '" 2>&1'
+}
+
 ; --- nvidia-smi -------------------------------------------------------
 
 CmdGpuSummary(logPath) {

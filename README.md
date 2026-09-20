@@ -13,6 +13,9 @@ Powered by [whisper.cpp](https://github.com/ggml-org/whisper.cpp).
 Run `Whispers-<version>-setup.exe`. It installs per user, under
 `%LOCALAPPDATA%\Whispers`, and **never asks for administrator rights**.
 
+Changing tier later, from the settings window, downloads the new model
+and verifies it against the hash in `versions.json` before keeping it.
+
 The wizard reads the GPU, preselects the tier that machine can run, and
 downloads four things: the whisper.cpp engine build matching the CUDA
 version the driver reports, ffmpeg, the AutoHotkey interpreter, and the
@@ -22,6 +25,18 @@ SHA-256 matches `versions.json`.
 Uninstalling removes the install root, including everything that was
 downloaded into it. Your settings, logs and history live in
 `%APPDATA%\Whispers`, and you are asked before those are touched.
+
+### The first time you run it
+
+A new installation opens a short setup window. It picks your microphone,
+lets you change the hotkey and the language, and then asks you to **hold
+the hotkey and say a sentence**. What you dictate appears in the window
+and is pasted nowhere, so you can test it with any window behind.
+
+That last step is the point: it runs the real pipeline — microphone,
+ffmpeg, the resident server, the model — rather than telling you that
+everything looks configured. It is reachable again afterwards from the
+tray menu, and an upgrade from a working installation never sees it.
 
 ### Unattended install
 
@@ -53,6 +68,37 @@ installer uses comes from that projection, so a pin is never written
 twice — and `installer\Whispers.iss` refuses to compile without
 `pins.iss`, which is what stops anyone building it by hand with stale
 values.
+
+---
+
+## Updates
+
+Whispers asks GitHub once at startup, eight seconds in so it cannot slow
+anything down, whether a newer release exists. If one does, the tray menu
+grows an entry that downloads it, checks it and runs it. Nothing is ever
+installed without that click, and the check can be turned off from the
+settings window.
+
+The request is a plain GET to the releases API. No identifier, no
+configuration and nothing about the machine is sent with it.
+
+### What the update check does and does not guarantee
+
+Every other download in this project is **pinned**: `versions.json`
+carries a SHA-256 recorded when the pin was raised, and anything that
+does not match it is deleted rather than kept.
+
+An update cannot work that way — the hash of a release that does not
+exist yet cannot be written down in advance. Its digest is read from the
+same API response as the download URL. So it guarantees that what
+arrived is what GitHub said it would serve, and that a truncated or
+corrupted download is rejected. It does not, on its own, prove who built
+the release. That is what code signing is for, and this installer is not
+signed yet.
+
+The same machinery fetches models, and there the guarantee is the full
+one: a model's hash comes from `versions.json`, not from whoever served
+the file.
 
 ---
 
@@ -191,7 +237,7 @@ installed system-wide and no administrator rights are required.
 
 Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 219 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 316 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.
@@ -200,7 +246,7 @@ the number of failures and writes `tests/results.txt`, and it runs in CI.
 AutoHotkey64.exe tests/run-tests.ahk
 ```
 
-**Integration** — `tests/integration.ps1`, 41 assertions that drive the
+**Integration** — `tests/integration.ps1`, 53 assertions that drive the
 real product: it launches Whispers, presses the hotkey through
 `keybd_event` and asserts on the log. Process lifetimes, model loading,
 thread interruption and orphaned recorders only exist at this level.
@@ -262,8 +308,15 @@ hand. They exist so it cannot happen twice.
 
 ### What neither suite covers
 
-Transcription accuracy on real speech, the settings window, and the tray
+Transcription accuracy on real speech, the settings window and the tray
 menu. Those need a human.
+
+So does the last step of an update. The suites prove that a release is
+found, compared, downloaded and checked against its digest, and that a
+wrong digest is rejected — but not that running the downloaded
+installer over a live installation works, because that needs a published
+release to install. The same goes for the download window's progress bar
+and its Cancel button.
 
 ## Licence
 

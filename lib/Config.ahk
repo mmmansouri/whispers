@@ -33,7 +33,9 @@ ConfigSpec() {
         "Hotkey",        ["UI",     "F9"],
         "AutoPaste",     ["UI",     "1"],
         "PlaySounds",    ["UI",     "1"],
-        "ShowIndicator", ["UI",     "1"]
+        "ShowIndicator", ["UI",     "1"],
+        "CheckUpdates",  ["UI",     "1"],
+        "Configured",    ["UI",     "0"]
     )
 }
 

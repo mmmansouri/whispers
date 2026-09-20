@@ -9,6 +9,22 @@
 
   "whispers": "2.0.0",
 
+  "updates": {
+    "_comment": [
+      "Where Whispers looks for a newer version of itself, and the",
+      "suffix of the asset to install. Remove this block to turn update",
+      "checking off for every install; a user can also turn it off for",
+      "their own machine from the settings window.",
+      "Unlike every other pin here, an update cannot carry a SHA-256",
+      "recorded in advance - the release does not exist yet. The hash is",
+      "read from GitHub's API response and used to reject a corrupted",
+      "download. See README.md, 'What the update check does and does not",
+      "guarantee'."
+    ],
+    "repo": "mmmansouri/whispers",
+    "asset_suffix": "-setup.exe"
+  },
+
   "engine": {
     "repo": "ggml-org/whisper.cpp",
     "tag": "b5130",

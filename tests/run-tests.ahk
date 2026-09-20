@@ -118,6 +118,12 @@ lvl := CmdMicLevel("ffmpeg.exe", "Line 1 (Virtual Audio Cable)", 3, "p.raw", "p.
 Has("level probe is time limited", lvl, "-t 3")
 Has("level probe asks for volumedetect", lvl, "-af volumedetect")
 
+dev := CmdListDevices("C:\p ffmpeg.exe", "C:\l\d.log")
+Has("enumeration quotes the executable", dev, '"C:\p ffmpeg.exe"')
+Has("enumeration asks dshow to list devices", dev, "-list_devices true -f dshow")
+Has("enumeration needs a dummy input", dev, "-i dummy")
+Has("the list arrives on stderr, so stderr is what we capture", dev, '2> "C:\l\d.log"')
+
 Group("Commands - conversion")
 
 plain := CmdConvert("ffmpeg.exe", "in.raw", "out.wav", "c.log", false)
@@ -208,6 +214,14 @@ Eq("zero stays zero", TierVramFrom(J, "cpu"), 0)
 Eq("missing numeric field is zero", TierVramFrom(J, "nope"), 0)
 Yes("GPU tier requires a GPU", TierNeedsGpuFrom(J, "max"))
 No("CPU tier does not", TierNeedsGpuFrom(J, "cpu"))
+
+Eq("TierField reads a string field", TierField(J, "max", "file"), "m.bin")
+Eq("TierField reads an unquoted field", TierField(J, "max", "vram_mb"), "4700")
+Eq("TierField reads a boolean field", TierField(J, "cpu", "requires_gpu"), "false")
+Eq("TierField on an unknown field yields nothing", TierField(J, "max", "colour"), "")
+Eq("TierField on an unknown tier yields nothing", TierField(J, "ludicrous", "file"), "")
+Eq("REGRESSION: TierField never reaches outside the tiers block",
+   TierField(J, "cpu", "asset"), "")
 
 Group("Tiers - labels")
 
@@ -392,6 +406,16 @@ Eq("too long a timeout is capped", SanitizeLoadTimeout("9999"), 600)
 
 Eq("a valid minimum passes", SanitizeMinBytes("8000"), 8000)
 Eq("an absurd minimum is capped", SanitizeMinBytes("999999999"), 1000000)
+
+Eq("SanitizeInt keeps a value in range", SanitizeInt("50", 1, 100, 10), 50)
+Eq("SanitizeInt raises below the floor", SanitizeInt("0", 1, 100, 10), 1)
+Eq("SanitizeInt caps above the ceiling", SanitizeInt("500", 1, 100, 10), 100)
+Eq("SanitizeInt falls back on text", SanitizeInt("abc", 1, 100, 10), 10)
+Eq("SanitizeInt falls back on the empty string", SanitizeInt("", 1, 100, 10), 10)
+Eq("SanitizeInt rejects a decimal rather than truncating it",
+   SanitizeInt("3.7", 1, 100, 10), 10)
+Eq("SanitizeInt accepts the floor itself", SanitizeInt("1", 1, 100, 10), 1)
+Eq("SanitizeInt accepts the ceiling itself", SanitizeInt("100", 1, 100, 10), 100)
 
 Group("Config - validation and units")
 

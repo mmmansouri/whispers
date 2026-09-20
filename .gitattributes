@@ -1,7 +1,14 @@
-# AutoHotkey is a Windows-only runtime: keep CRLF in the working tree and
-# in the repository, so a clone on any platform produces a runnable script.
+# Normalise everything in the repository to LF, then restore the working
+# tree per type on checkout.
+* text=auto eol=lf
+
+# AutoHotkey is a Windows-only runtime and Inno Setup scripts are read by
+# a Windows compiler: both get CRLF in the working tree, on every platform.
 *.ahk   text eol=crlf
 *.iss   text eol=crlf
-*.json  text eol=lf
-*.md    text eol=lf
-*.yml   text eol=lf
+
+# Fetched binaries, never diffed.
+*.exe   binary
+*.dll   binary
+*.bin   binary
+*.zip   binary

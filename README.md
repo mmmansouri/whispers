@@ -178,8 +178,8 @@ whisper.cpp build instead of an installed one:
 
 ```ini
 [Paths]
-BinDir=D:\Work\projects\whisper.cpp\build\bin
-ModelsDir=D:\Work\projects\whisper.cpp\models
+BinDir=C:\dev\whisper.cpp\build\bin
+ModelsDir=C:\dev\whisper.cpp\models
 ```
 
 ## Pinned dependencies

@@ -1,0 +1,7 @@
+# AutoHotkey is a Windows-only runtime: keep CRLF in the working tree and
+# in the repository, so a clone on any platform produces a runnable script.
+*.ahk   text eol=crlf
+*.iss   text eol=crlf
+*.json  text eol=lf
+*.md    text eol=lf
+*.yml   text eol=lf

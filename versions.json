@@ -1,0 +1,99 @@
+{
+  "_comment": [
+    "Pinned dependency versions for Whispers.",
+    "Nothing here is ever resolved as 'latest' at run time: every artefact is",
+    "fetched at the exact tag below and rejected unless its SHA-256 matches.",
+    "Raising a pin is a deliberate act: edit this file, re-run tools/validate,",
+    "then publish. See README.md, section 'Raising a pinned version'."
+  ],
+
+  "whispers": "2.0.0",
+
+  "engine": {
+    "repo": "ggml-org/whisper.cpp",
+    "tag": "b5130",
+    "_comment": [
+      "Binaries live on bNNNN build tags. The semantic vX.Y.Z tags carry no",
+      "assets from v1.9.3 onward - pinning 'v1.9.4' would download nothing.",
+      "b5130 was published the same day as v1.9.4 (2026-09-11).",
+      "Each CUDA archive bundles its own cudart/cublas DLLs, so the target",
+      "machine needs an NVIDIA driver but no CUDA Toolkit."
+    ],
+    "variants": {
+      "cuda-12.4": {
+        "asset": "whisper-cublas-12.4.0-bin-x64.zip",
+        "size": 674539285,
+        "sha256": "af520ddd034d985b55dfeea3e465ed93653ba2aee1a55e865033edc548c272a7",
+        "min_cuda": "12.4"
+      },
+      "cuda-11.8": {
+        "asset": "whisper-cublas-11.8.0-bin-x64.zip",
+        "size": 272982859,
+        "sha256": "0b29b2175bb17ec26da29677cbc7c467c57d103245144d62a49a703f6bc3fdae",
+        "min_cuda": "11.8"
+      },
+      "cpu": {
+        "asset": "whisper-blas-bin-x64.zip",
+        "size": 21360234,
+        "sha256": "55c06d09e8b9b6cfb2b0b47ddedc71803054f0e48be1f41848b3141c06c703a9",
+        "min_cuda": null
+      }
+    }
+  },
+
+  "ffmpeg": {
+    "repo": "GyanD/codexffmpeg",
+    "tag": "9.0.2",
+    "asset": "ffmpeg-9.0.2-essentials_build.zip",
+    "size": 114768076,
+    "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+    "extract": ["ffmpeg.exe"],
+    "validated": {
+      "date": "2026-09-20",
+      "host": "Windows 11 26200",
+      "checks": ["version", "dshow enumeration", "dshow capture", "raw to wav", "silenceremove"]
+    }
+  },
+
+  "models": {
+    "source": "https://huggingface.co/ggerganov/whisper.cpp",
+    "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+    "_comment": [
+      "Tiers are named by user benefit, not by model name: the user never",
+      "picks a file. Measured on an i9-12900K / RTX 4070 Ti, 11 s of audio,",
+      "model load included - see README.md for the full table.",
+      "'cpu' is forced on machines without a usable NVIDIA GPU: the turbo",
+      "models share large-v3's encoder, so they bring no CPU speedup."
+    ],
+    "tiers": {
+      "fast": {
+        "file": "ggml-large-v3-turbo-q5_0.bin",
+        "size": 574041195,
+        "sha256": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        "vram_mb": 1500,
+        "requires_gpu": true
+      },
+      "balanced": {
+        "file": "ggml-large-v3-turbo.bin",
+        "size": 1624555275,
+        "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+        "vram_mb": 2800,
+        "requires_gpu": true
+      },
+      "max": {
+        "file": "ggml-large-v3.bin",
+        "size": 3095033483,
+        "sha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+        "vram_mb": 4700,
+        "requires_gpu": true
+      },
+      "cpu": {
+        "file": "ggml-small.bin",
+        "size": 487601967,
+        "sha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        "vram_mb": 0,
+        "requires_gpu": false
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# Fetched at install time, never committed: see versions.json for the
+# pinned version and SHA-256 of each one.
+/bin/
+/models/
+/AutoHotkey64.exe
+
+# Build output of the installer.
+/dist/
+
+# Scratch space used by the validation scripts.
+/.work/
+/.probe*

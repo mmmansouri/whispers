@@ -217,9 +217,15 @@ your own settings afterwards even when it fails.
 **Installer** — `tests/installer.ps1`, 66 assertions in two halves.
 
 ```
-pwsh -File tests/installer.ps1 -StaticOnly   # sources only, runs in CI
-pwsh -File tests/installer.ps1               # installs for real, ~600 MB
+pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI
+pwsh -File tests/installer.ps1                 # installs for real, ~600 MB
+pwsh -File tests/installer.ps1 -Engine auto    # ... on the real CUDA path, ~1.2 GB
 ```
+
+`-Engine cpu`, the default, keeps the run cheap by forcing the 21 MB
+engine build. `-Engine auto` installs whatever this machine's driver
+actually calls for and adds one assertion: that `ggml-cuda.dll` is
+there, so a CPU build was not silently installed on a CUDA machine.
 
 The static half compares the installer's sources against `versions.json`
 key by key, and against `lib/Tiers.ahk`: the installer runs before the

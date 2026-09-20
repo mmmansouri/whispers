@@ -29,7 +29,13 @@
 [CmdletBinding()]
 param(
     [switch]$StaticOnly,
-    [string]$Tier = 'cpu'
+    [ValidateSet('fast', 'balanced', 'max', 'cpu')]
+    [string]$Tier = 'cpu',
+    # 'cpu' keeps the run cheap: 21 MB of engine instead of 643 MB.
+    # 'auto' exercises the CUDA path this machine would really install,
+    # which is the only way to prove those DLLs resolve.
+    [ValidateSet('cpu', 'auto')]
+    [string]$Engine = 'cpu'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -197,8 +203,10 @@ try {
         '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART',
         "/LOG=$setupLog", "/DIR=$target",
         '/MERGETASKS=!desktopicon,!startup',
-        "/TIER=$Tier", '/ENGINE=cpu'
+        "/TIER=$Tier"
     )
+    if ($Engine -eq 'cpu') { $args += '/ENGINE=cpu' }
+    Write-Host "  .... tier=$Tier engine=$Engine into $target" -ForegroundColor DarkGray
     $p = Start-Process -FilePath $setupExe -ArgumentList $args -Wait -PassThru
     AssertEq 'setup exits successfully' 0 $p.ExitCode
     if ($p.ExitCode -ne 0) {
@@ -218,6 +226,11 @@ try {
     }
     $dlls = @(Get-ChildItem (Join-Path $target 'bin') -Filter '*.dll' -EA SilentlyContinue).Count
     AssertTrue 'the engine DLLs came with it' ($dlls -ge 5) "$dlls DLLs"
+    if ($Engine -eq 'auto') {
+        AssertTrue 'the CUDA build was selected from the driver, not guessed' `
+            (Test-Path (Join-Path $target 'bin\ggml-cuda.dll')) `
+            'ggml-cuda.dll is missing, so a CPU build was installed on a CUDA machine'
+    }
 
     # The archives carry 23 extra executables and ffmpeg carries two more
     # at 105 MB each. Shipping them would triple the install for nothing.

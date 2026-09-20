@@ -306,6 +306,16 @@ Yes("stereo mix is virtual", IsVirtualDevice("Stereo Mix (Realtek)"))
 Yes("localised stereo mix is virtual", IsVirtualDevice("Mixage stereo"))
 Yes("VoiceMeeter is virtual", IsVirtualDevice("VoiceMeeter Output"))
 No("a real USB microphone is not virtual", IsVirtualDevice("Microphone (HyperX QuadCast S)"))
+
+; A tap on the hotkey used to be reported as "Mic capture failed",
+; because ffmpeg is killed before it opens the device and no file exists
+; - which on disk is indistinguishable from a broken microphone.
+Yes("REGRESSION: a tap is too short to have captured anything", CaptureTooShort(300))
+Yes("so is a one-second press", CaptureTooShort(1000))
+No("a two-second press is long enough", CaptureTooShort(2000))
+No("and a normal dictation certainly is", CaptureTooShort(8000))
+; Defensive: a clock that went backwards must not be read as a long press.
+Yes("a negative elapsed time is too short", CaptureTooShort(-50))
 No("a webcam microphone is not virtual", IsVirtualDevice("Microphone (Logitech StreamCam)"))
 
 Group("Devices - endpoint to dshow mapping")

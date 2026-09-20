@@ -86,6 +86,7 @@ gPaused      := false
 gBusy        := false
 gStopping    := false
 gRecStart    := ""
+gRecMs       := 0       ; A_TickCount at the start of a capture
 gRecTick     := 0
 gFfmpegPid   := 0
 gServerPid   := 0
@@ -623,7 +624,7 @@ CheckIdle() {
 ; Recording
 ; =====================================================================
 StartRec() {
-    global Cfg, gRecording, gPaused, gBusy, gStopping, gRecStart, gRecTick
+    global Cfg, gRecording, gPaused, gBusy, gStopping, gRecStart, gRecTick, gRecMs
     global gFfmpegPid, TEMP_RAW, TEMP_WAV, TEMP_TXT, MIC_LOG, ROOT_DIR, FFMPEG_EXE
 
     ; gStopping closes the window between "gRecording := false" and the end
@@ -657,6 +658,7 @@ StartRec() {
     try FileDelete(MIC_LOG)
 
     gRecStart := A_Now
+    gRecMs := A_TickCount
     gRecTick  := A_TickCount
 
     if (Cfg["PlaySounds"])
@@ -701,7 +703,7 @@ KillRecorder() {
 
 ; Returns true only when a fresh WAV is ready to transcribe.
 StopRec() {
-    global Cfg, gRecording, gStopping, TEMP_RAW, TEMP_WAV, MIC_LOG, ROOT_DIR, FFMPEG_EXE
+    global Cfg, gRecording, gStopping, gRecMs, TEMP_RAW, TEMP_WAV, MIC_LOG, ROOT_DIR, FFMPEG_EXE
 
     if !gRecording
         return false
@@ -722,7 +724,14 @@ StopRec() {
     Critical("Off")
 
     if !FileExist(TEMP_RAW) {
-        Fail("Mic capture failed: " Cfg["Mic"], TailFile(MIC_LOG, 220))
+        ; No file can mean a broken device, or a press too short for
+        ; ffmpeg to have opened one. Only the clock separates them, and
+        ; telling someone their microphone failed when they tapped the
+        ; key sends them hunting for a fault that is not there.
+        if CaptureTooShort(A_TickCount - gRecMs)
+            Fail("Too short - hold " Cfg["Hotkey"] " down while you speak", "")
+        else
+            Fail("Mic capture failed: " Cfg["Mic"], TailFile(MIC_LOG, 220))
         gStopping := false
         return false
     }

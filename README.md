@@ -237,7 +237,7 @@ installed system-wide and no administrator rights are required.
 
 Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 316 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 321 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.
@@ -305,6 +305,7 @@ hand. They exist so it cannot happen twice.
 | `the hotkey is never live while no microphone is set` | The hotkey was armed during first-run detection, so an early press failed with advice to go and fix something that was about to fix itself. |
 | `tabs are stripped before a TSV write` | A transcription containing a tab corrupted the history file. |
 | `a cleared field is whitespace, not a path` | `ModelsDir= ` was treated as a directory named " ". |
+| `a tap is too short to have captured anything` | A press too short for ffmpeg to open the device left no file, and was reported as "Mic capture failed" — sending the user to look for a hardware fault that was not there. |
 
 ### What neither suite covers
 

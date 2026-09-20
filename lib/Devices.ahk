@@ -78,3 +78,17 @@ MatchDevice(name, devices) {
     }
     return ""
 }
+
+; ffmpeg needs about a second to open a dshow device before it writes
+; the first byte. A press shorter than that is killed before the capture
+; file exists at all - which, looking only at the disk, is exactly what
+; a broken microphone looks like.
+;
+; So the elapsed time is what tells the two apart. Without it the user
+; who taps the key is told their microphone failed, and goes looking for
+; a fault in their hardware that is not there. The same mistake as
+; arming the hotkey before detection: blaming the setup for something
+; transient.
+CaptureTooShort(elapsedMs) {
+    return elapsedMs < 1500
+}

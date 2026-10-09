@@ -13,3 +13,7 @@
 *.dll   binary
 *.bin   binary
 *.zip   binary
+
+# Drawn by tools/build-icons.ps1, committed as is.
+*.ico   binary
+*.png   binary

@@ -198,8 +198,30 @@ AssertTrue 'the .iss ships at least the script, the core and the pins' ($sources
 $missing = @($sources | Where-Object { -not (Get-Item (Join-Path $root $_) -EA SilentlyContinue) })
 AssertTrue 'every file the .iss ships exists' ($missing.Count -eq 0) ($missing -join '; ')
 
+# The icon family replaces shell32's stock icons. tools\build-icons.ps1
+# draws it and the outputs are committed, so a missing one is a file
+# somebody forgot to add, not something a build would regenerate.
+$assets = @('Whispers.ico') +
+          @('ready', 'recording', 'working', 'paused' | ForEach-Object { "tray\$_.ico" }) +
+          @(100, 125, 150, 175, 200 | ForEach-Object { "installer\wizard-$_.png", "installer\wizard-small-$_.png" })
+$absent = @($assets | Where-Object { -not (Test-Path (Join-Path $root "assets\$_")) })
+AssertTrue 'every brand asset is committed' ($absent.Count -eq 0) ($absent -join '; ')
+
+# An .ico without the small sizes is scaled down by the shell from 256,
+# which is exactly the grey mush drawing per size exists to avoid.
+$icoSizes = @()
+$icoPath = Join-Path $root 'assets\Whispers.ico'
+if (Test-Path $icoPath) {
+    $ico = [System.IO.File]::ReadAllBytes($icoPath)
+    for ($i = 0; $i -lt [BitConverter]::ToUInt16($ico, 4); $i++) {
+        $w = $ico[6 + 16 * $i]
+        $icoSizes += $(if ($w -eq 0) { 256 } else { $w })
+    }
+}
+AssertEq 'Whispers.ico carries every size from 16 to 256 px' '16,20,24,32,40,48,64,256' ($icoSizes -join ',')
+
 # Encoding discipline, same rule as every other Windows-only source.
-foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), $PSCommandPath)) {
+foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), $PSCommandPath)) {
     $bytes = [System.IO.File]::ReadAllBytes($f)
     $name  = Split-Path $f -Leaf
     AssertTrue "$name is ASCII" (@($bytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'non-ASCII bytes present'

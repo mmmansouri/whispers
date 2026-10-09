@@ -78,6 +78,12 @@ twice — and `installer\Whispers.iss` refuses to compile without
 `pins.iss`, which is what stops anyone building it by hand with stale
 values.
 
+The icons and the installer's images under `assets\` are drawn by
+`.	oolsuild-icons.ps1` and committed. The mark is drawn at every size
+rather than scaled down from one master, so the 16 px tray icon keeps
+four distinct bars; rerun the script after changing the drawing, and it
+writes byte-identical files when nothing changed.
+
 ---
 
 ## Updates
@@ -177,6 +183,7 @@ its own location.
   versions.json          pinned versions + SHA-256
   bin\                   whisper-server, whisper-cli, ffmpeg, DLLs
   models\                the one model for the selected tier
+  assets\                icons and installer images
 
 %APPDATA%\Whispers\      Whispers.ini, logs\, history.tsv
 %TEMP%\Whispers\         capture scratch files
@@ -270,7 +277,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 87 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 91 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI

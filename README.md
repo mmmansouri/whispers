@@ -71,8 +71,9 @@ or the one already configured if Whispers was installed before.
 ```
 
 It projects `versions.json` into `installer\pins.iss` and compiles with
-[Inno Setup 6](https://jrsoftware.org/isinfo.php)
-(`winget install JRSoftware.InnoSetup`). Every URL and hash the
+[Inno Setup](https://jrsoftware.org/isinfo.php) 6.7 or newer
+(`winget install JRSoftware.InnoSetup`); the script refuses an older
+compiler, which could not build its light/dark wizard. Every URL and hash the
 installer uses comes from that projection, so a pin is never written
 twice — and `installer\Whispers.iss` refuses to compile without
 `pins.iss`, which is what stops anyone building it by hand with stale
@@ -279,7 +280,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 99 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 103 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI

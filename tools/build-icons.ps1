@@ -206,10 +206,15 @@ function New-WizardSmall([int] $s) {
 
 # ------------------------------------------------------------- writing
 
+# The leading comma keeps the byte[] whole. Without it PowerShell unrolls
+# it into the pipeline and the caller gets an object[] of boxed bytes,
+# which BinaryWriter.Write does not write as bytes: the 256 px entry of
+# Whispers.ico was garbage that Windows silently skipped, until Inno
+# Setup's compiler refused the icon as invalid.
 function Get-PngBytes($bmp) {
     $ms = New-Object IO.MemoryStream
     $bmp.Save($ms, [Drawing.Imaging.ImageFormat]::Png)
-    return $ms.ToArray()
+    return , $ms.ToArray()
 }
 
 # One ICO entry. Sizes under 256 are classic 32-bit DIBs, which every
@@ -217,7 +222,7 @@ function Get-PngBytes($bmp) {
 # PNG, which is what Windows expects at that size.
 function Get-IcoEntry($bmp) {
     $s = $bmp.Width
-    if ($s -ge 256) { return , (Get-PngBytes $bmp) }
+    if ($s -ge 256) { return , [byte[]](Get-PngBytes $bmp) }
     $ms = New-Object IO.MemoryStream
     $bw = New-Object IO.BinaryWriter $ms
     $maskRow = [int]([math]::Floor(($s + 31) / 32) * 4)

@@ -238,6 +238,26 @@ if (Test-Path $icoPath) {
 }
 AssertEq 'Whispers.ico carries every size from 16 to 256 px' '16,20,24,32,40,48,64,256' ($icoSizes -join ',')
 
+# Windows skips a broken entry and scales another one up, so a corrupt
+# icon looks fine everywhere except in Inno Setup's compiler, which
+# refuses it. Every entry must lie inside the file and be a DIB (a 40-byte
+# BITMAPINFOHEADER) or a PNG.
+$badEntries = @()
+foreach ($rel in @('Whispers.ico') + @('ready', 'recording', 'working', 'paused' | ForEach-Object { "tray\$_.ico" })) {
+    $p = Join-Path $root "assets\$rel"
+    if (-not (Test-Path $p)) { continue }
+    $b = [System.IO.File]::ReadAllBytes($p)
+    for ($i = 0; $i -lt [BitConverter]::ToUInt16($b, 4); $i++) {
+        $len = [BitConverter]::ToInt32($b, 6 + 16 * $i + 8)
+        $off = [BitConverter]::ToInt32($b, 6 + 16 * $i + 12)
+        $ok = ($off + $len -le $b.Length) -and (
+              ([BitConverter]::ToInt32($b, $off) -eq 40) -or
+              ($b[$off] -eq 0x89 -and $b[$off + 1] -eq 0x50 -and $b[$off + 2] -eq 0x4E -and $b[$off + 3] -eq 0x47))
+        if (-not $ok) { $badEntries += "$rel entry $i" }
+    }
+}
+AssertTrue 'every icon entry is a whole DIB or PNG' ($badEntries.Count -eq 0) ($badEntries -join '; ')
+
 # The sounds are cues, not jingles: a key press must not be answered by
 # something still playing when the user starts to speak. Plain PCM, which
 # PlaySound plays from memory without a codec.
@@ -254,6 +274,18 @@ AssertTrue 'every sound is PCM and at most 120 ms long' ($long.Count -eq 0) ($lo
 # a microphone near speakers recorded it into the dictation.
 AssertTrue 'nothing blocks on a beep any more' `
     ((Get-Content (Join-Path $root 'Whispers.ahk') -Raw) -notmatch 'SoundBeep\(') 'SoundBeep is back in Whispers.ahk'
+
+# The wizard's look (issue #6). The compiler gate is what makes an old
+# Inno Setup fail with an explanation instead of a syntax error.
+AssertTrue 'the wizard follows Windows light and dark with the windows11 style' `
+    ($iss -match '(?m)^WizardStyle=modern dynamic windows11') 'WizardStyle is not "modern dynamic windows11"'
+AssertTrue 'the installer refuses an Inno Setup older than 6.7' `
+    ($iss -match '#if Ver < EncodeVer\(6, 7, 0\)\s+#error') 'the Ver gate is missing'
+$imgs = @([regex]::Matches($iss, '(?m)^(WizardImageFile|WizardSmallImageFile|WizardImageFileDynamicDark|WizardSmallImageFileDynamicDark|SetupIconFile)=(.+)$') |
+          ForEach-Object { $_.Groups[2].Value -split ',' } | ForEach-Object { $_.Trim() -replace '^\.\.\\', '' })
+$noImg = @($imgs | Where-Object { -not (Test-Path (Join-Path $root $_)) })
+AssertTrue 'the wizard images, light and dark, and the setup icon are the ones in assets' `
+    (($imgs.Count -eq 21) -and ($noImg.Count -eq 0)) "$($imgs.Count) referenced, missing: $($noImg -join '; ')"
 
 # Encoding discipline, same rule as every other Windows-only source.
 foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), (Join-Path $root 'tools\build-sounds.ps1'), $PSCommandPath)) {

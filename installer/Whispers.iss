@@ -14,6 +14,16 @@
 ; administrator rights.
 ; =====================================================================
 
+; The appearance below ("dynamic", the windows11 style, hidebevels) needs
+; Inno Setup 6.7. Checked here, by the compiler itself, rather than in
+; tools\build-installer.ps1: ISCC.exe and its DLLs carry no version
+; resource, and ISPP's Ver is the one version number that cannot be
+; wrong. An older compiler would otherwise fail on the WizardStyle line
+; with a message that does not say why.
+#if Ver < EncodeVer(6, 7, 0)
+  #error Inno Setup 6.7 or newer is required - winget upgrade JRSoftware.InnoSetup
+#endif
+
 #ifnexist "pins.iss"
   #error pins.iss is missing - build through tools\build-installer.ps1, not ISCC directly
 #endif
@@ -55,7 +65,23 @@ ArchiveExtraction=full
 CloseApplications=yes
 RestartApplications=no
 
-WizardStyle=modern
+; Follows Windows' light or dark mode with Inno's built-in windows11
+; style, without the horizontal bevel lines of older Windows. The images
+; are drawn by tools\build-icons.ps1 at 100-200 %; Inno picks the best
+; fit for the screen. They are opaque or transparent-backed, so the same
+; files serve both modes - but they must be named twice: in dark mode Inno
+; reads the *DynamicDark directives, whose default is its own built-in
+; image, not the light one (seen: Inno's box in our dark header).
+; Identical files are stored once.
+WizardStyle=modern dynamic windows11 hidebevels
+WizardImageFile=..\assets\installer\wizard-100.png,..\assets\installer\wizard-125.png,..\assets\installer\wizard-150.png,..\assets\installer\wizard-175.png,..\assets\installer\wizard-200.png
+WizardSmallImageFile=..\assets\installer\wizard-small-100.png,..\assets\installer\wizard-small-125.png,..\assets\installer\wizard-small-150.png,..\assets\installer\wizard-small-175.png,..\assets\installer\wizard-small-200.png
+WizardImageFileDynamicDark=..\assets\installer\wizard-100.png,..\assets\installer\wizard-125.png,..\assets\installer\wizard-150.png,..\assets\installer\wizard-175.png,..\assets\installer\wizard-200.png
+WizardSmallImageFileDynamicDark=..\assets\installer\wizard-small-100.png,..\assets\installer\wizard-small-125.png,..\assets\installer\wizard-small-150.png,..\assets\installer\wizard-small-175.png,..\assets\installer\wizard-small-200.png
+SetupIconFile=..\assets\Whispers.ico
+; The welcome page is the one that shows the side image; Inno 6 hides it
+; by default.
+DisableWelcomePage=no
 OutputDir=..\dist
 OutputBaseFilename={#AppName}-{#AppVersion}-setup
 Compression=lzma2/max
@@ -66,6 +92,11 @@ LicenseFile=..\LICENSE
 
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"
+
+[Messages]
+; What the product is, instead of the stock advice to close every other
+; application - which Whispers does not need: it stops its own instance.
+WelcomeLabel2=This will install [name/ver] - push-to-talk dictation that runs entirely on this computer.%n%nIt installs for you only, without administrator rights, and downloads the speech model that fits your graphics card. Already installed? Your settings, history and model are kept.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked

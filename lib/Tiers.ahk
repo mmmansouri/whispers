@@ -72,6 +72,24 @@ TierNeedsGpuFrom(json, tier) {
     return TierField(json, tier, "requires_gpu") = "true"
 }
 
+; The model files of every tier except keepTier, for removal once a tier
+; change is committed. Nothing at all when keepTier cannot be resolved:
+; not knowing which file to keep is no basis for deleting the others.
+; Only names versions.json gives, so nothing else in the directory is
+; ever a candidate.
+OtherTierFiles(json, keepTier) {
+    keep := TierFileFrom(json, keepTier)
+    out := []
+    if (keep = "")
+        return out
+    for t in TierList() {
+        f := TierFileFrom(json, t)
+        if (f != "" && f != keep && !HasValue(out, f))
+            out.Push(f)
+    }
+    return out
+}
+
 ; The tier a machine should run, from what was actually detected.
 ;
 ; The thresholds leave headroom above each tier's own VRAM figure,

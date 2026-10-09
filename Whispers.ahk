@@ -9,6 +9,7 @@
 #Include %A_LineFile%\..\lib\Devices.ahk
 #Include %A_LineFile%\..\lib\Commands.ahk
 #Include %A_LineFile%\..\lib\Net.ahk
+#Include %A_LineFile%\..\lib\Install.ahk
 
 ; =====================================================================
 ; Whispers - push-to-talk dictation powered by whisper.cpp
@@ -643,7 +644,10 @@ StartRec() {
     ; function, and StartRec then resumes its tail *after* the transcription
     ; has already finished - re-arming state that StopRec just cleared.
     Critical("On")
-    LogMsg("DEBUG", "StartRec")
+    ; The device is logged because nothing else says which one actually
+    ; recorded: a capture from the wrong microphone succeeds, and only
+    ; shows up as whisper inventing text over silence.
+    LogMsg("DEBUG", "StartRec mic=" Cfg["Mic"])
 
     ; Kill any leftover recorder BEFORE starting a new one, and block on
     ; it: an asynchronous taskkill lands a few hundred ms later and
@@ -1061,6 +1065,55 @@ EnsureModelInstalled(tier, ask := true) {
             return false
     }
     return FetchVerified(ModelUrl(tier), path, ModelSha(tier), "Model " file, size)
+}
+
+; Called once a tier change is committed and its model is on disk. A
+; change used to leave the previous model behind - 3 GB for max - so
+; disk use grew with every change, against what the README promises.
+; Only in Whispers' own models\ directory, and only files versions.json
+; names (see OtherTierFiles and UsesDefaultDir).
+PruneOtherModels() {
+    global Cfg, MODELS_DIR
+    if !UsesDefaultDir(Cfg["ModelsDir"]) {
+        LogMsg("INFO", "Models directory is overridden - previous models left in place")
+        return
+    }
+    for f in OtherTierFiles(VerRead(), Cfg["Tier"]) {
+        p := MODELS_DIR "\" f
+        if !FileExist(p)
+            continue
+        try {
+            FileDelete(p)
+            LogMsg("INFO", "Removed the model of a previous tier: " f)
+        } catch as e {
+            LogMsg("WARN", "Could not remove " p ": " e.Message)
+        }
+    }
+}
+
+; Keeps the size in "Installed apps" true after a model was added or
+; removed. Only for the installation Windows has registered: a
+; development checkout must not rewrite the entry of the installed copy.
+UpdateInstalledSize() {
+    global ROOT_DIR
+    key := UninstallKey()
+    loc := ""
+    try {
+        loc := RegRead(key, "InstallLocation")
+    } catch {
+        return
+    }
+    if !SameDir(loc, ROOT_DIR)
+        return
+    bytes := 0
+    Loop Files, ROOT_DIR "\*", "FR"
+        bytes += A_LoopFileSize
+    try {
+        RegWrite(KbFromBytes(bytes), "REG_DWORD", key, "EstimatedSize")
+        LogMsg("INFO", "Installed size recorded: " Round(bytes / 1048576) " MB")
+    } catch as e {
+        LogMsg("WARN", "Could not record the installed size: " e.Message)
+    }
 }
 
 ; =====================================================================
@@ -1633,6 +1686,15 @@ SaveSettings(btn, *) {
     if !FileExist(ModelPath())
         EnsureModelInstalled(Cfg["Tier"], true)
 
+    ; Only once the new model is really there: a declined or failed
+    ; download keeps the previous one, so going back costs nothing. The
+    ; server holding the old file was stopped above.
+    if (oldTier != Cfg["Tier"]) {
+        if FileExist(ModelPath())
+            PruneOtherModels()
+        UpdateInstalledSize()
+    }
+
     BuildTray()
     SetState(gPausedState())
     RefreshStatus()
@@ -1681,6 +1743,7 @@ ShowFirstRun() {
     gWizCtl["Mic"] := g.Add("DropDownList", "xm+20 y+6 w500", devices)
     if (Cfg["Mic"] != "")
         gWizCtl["Mic"].Text := Cfg["Mic"]
+    gWizCtl["Mic"].OnEvent("Change", WizMicChanged)
     g.Add("Button", "xm+20 y+8 w150", "Say a sentence").OnEvent("Click", WizTestMic)
     gWizCtl["MicResult"] := g.Add("Text", "x+10 yp+4 w330", "Records 3 seconds and reports the level.")
 
@@ -1689,7 +1752,12 @@ ShowFirstRun() {
     gWizCtl["Hotkey"].Value := Cfg["Hotkey"]
     gWizCtl["Language"] := g.Add("DropDownList", "x+10 yp w80", ["fr", "en", "auto"])
     gWizCtl["Language"].Text := Cfg["Language"]
+    gWizCtl["Language"].OnEvent("Change", WizLanguageChanged)
     g.Add("Text", "x+10 yp+4 w280", "Hold the key, speak, release.")
+    ; The hotkey alone waits for Finish: the control reports every
+    ; intermediate state while keys are pressed, and registering each of
+    ; those would fail on half-typed combinations.
+    g.Add("Text", "xm+20 y+8 w500", "A new hotkey takes effect when you click Finish.")
 
     g.Add("Text", "xm y+16 w520", "3.  Model")
     gWizCtl["Model"] := g.Add("Text", "xm+20 y+8 w320", "")
@@ -1732,9 +1800,29 @@ WizTestMic(btn, *) {
         : "Heard " Round(level, 1) " dB - that works."
 }
 
+; Step 4 dictates through the real pipeline, which reads Cfg. Applying
+; these only on Finish meant the test recorded from the microphone
+; detected at startup while the window showed another one, and whisper
+; turned the silence into an invented caption. Writing them to the INI
+; still waits for Finish.
+WizMicChanged(ctl, *) {
+    global Cfg
+    Cfg["Mic"] := ctl.Text
+    LogMsg("INFO", "Setup: microphone set to " ctl.Text)
+}
+
+; The language travels with every request, so the running server picks
+; it up without a restart.
+WizLanguageChanged(ctl, *) {
+    global Cfg
+    Cfg["Language"] := ctl.Text
+    LogMsg("INFO", "Setup: language set to " ctl.Text)
+}
+
 WizGetModel(btn, *) {
     global Cfg
     EnsureModelInstalled(Cfg["Tier"], true)
+    UpdateInstalledSize()
     WizRefreshModel()
 }
 
@@ -1775,7 +1863,10 @@ WizFinish(btn, *) {
 }
 
 GetModelClick(btn, *) {
+    ; No pruning here: the tier picked in the dropdown is not saved yet,
+    ; and the committed tier's model must stay until it is.
     EnsureModelInstalled(SelectedTier(), true)
+    UpdateInstalledSize()
     RefreshStatus()
 }
 

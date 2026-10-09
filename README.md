@@ -14,7 +14,10 @@ Run `Whispers-<version>-setup.exe`. It installs per user, under
 `%LOCALAPPDATA%\Whispers`, and **never asks for administrator rights**.
 
 Changing tier later, from the settings window, downloads the new model
-and verifies it against the hash in `versions.json` before keeping it.
+and verifies it against the hash in `versions.json` before keeping it;
+once the change is saved, the previous tier's model is deleted. The size
+Windows lists under Installed apps is the real one - engine, ffmpeg,
+interpreter and model included - and is updated after a tier change.
 
 The wizard reads the GPU, preselects the tier that machine can run, and
 downloads four things: the whisper.cpp engine build matching the CUDA
@@ -22,8 +25,8 @@ version the driver reports, ffmpeg, the AutoHotkey interpreter, and the
 one model for the selected tier. Each download is rejected unless its
 SHA-256 matches `versions.json`.
 
-Uninstalling removes the install root, including everything that was
-downloaded into it. Your settings, logs and history live in
+Uninstalling stops a running Whispers first, then removes the install
+root, including everything that was downloaded into it. Your settings, logs and history live in
 `%APPDATA%\Whispers`, and you are asked before those are touched.
 
 ### The first time you run it
@@ -58,7 +61,7 @@ or the one already configured if Whispers was installed before.
 ### Building the installer
 
 ```
-.	oolsuild-installer.ps1
+.\tools\build-installer.ps1
 ```
 
 It projects `versions.json` into `installer\pins.iss` and compiles with
@@ -237,7 +240,7 @@ installed system-wide and no administrator rights are required.
 
 Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 321 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 342 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.
@@ -260,7 +263,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 66 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 78 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI
@@ -305,12 +308,14 @@ hand. They exist so it cannot happen twice.
 | `the hotkey is never live while no microphone is set` | The hotkey was armed during first-run detection, so an early press failed with advice to go and fix something that was about to fix itself. |
 | `tabs are stripped before a TSV write` | A transcription containing a tab corrupted the history file. |
 | `a cleared field is whitespace, not a path` | `ModelsDir= ` was treated as a directory named " ". |
+| `the size Windows lists includes the downloads` | Installed apps listed Whispers at 4.33 MB - the script and the uninstaller - while the engine, ffmpeg and the model made it 3.9 GB. |
+| `the uninstall stops the Whispers that was running` | Uninstalling from Windows left the running instance alive: the hotkey kept answering with ffmpeg deleted, every dictation failed, and the files it held stayed on disk. |
 | `a tap is too short to have captured anything` | A press too short for ffmpeg to open the device left no file, and was reported as "Mic capture failed" — sending the user to look for a hardware fault that was not there. |
 
 ### What neither suite covers
 
-Transcription accuracy on real speech, the settings window and the tray
-menu. Those need a human.
+Transcription accuracy on real speech, the setup window, the settings
+window and the tray menu. Those need a human.
 
 So does the last step of an update. The suites prove that a release is
 found, compared, downloaded and checked against its digest, and that a

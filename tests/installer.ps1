@@ -150,6 +150,33 @@ AssertEq 'the installer knows exactly the tiers versions.json defines' `
     (($version.models.tiers.PSObject.Properties.Name | Sort-Object) -join ',') `
     (($issTiers | Sort-Object) -join ',')
 
+# REGRESSION: uninstalling from Windows left the running Whispers alive.
+# The hotkey kept answering with ffmpeg deleted, every dictation failed,
+# and 1.1 GB of locked files stayed on disk. The end-to-end group proves
+# the behaviour; these pin where the stop happens and how it matches.
+AssertTrue 'REGRESSION: the uninstaller stops a running Whispers before deleting it' `
+    ($iss -match 'usUninstall then begin\s+StopRunningWhispers;') `
+    'CurUninstallStepChanged no longer calls StopRunningWhispers on usUninstall'
+AssertTrue 'an install over a running Whispers stops it first' `
+    ($iss -match 'function PrepareToInstall[^\r\n]*\s+begin\s+StopRunningWhispers;') `
+    'PrepareToInstall no longer calls StopRunningWhispers'
+AssertTrue 'processes are matched on their path, never on a bare image name' `
+    ($iss -notmatch 'taskkill\s+/IM') `
+    'a taskkill /IM would also kill AutoHotkey scripts and ffmpeg runs that are not ours'
+
+AssertTrue 'the installed size is recorded once the downloads have landed' `
+    ($iss -match 'ssPostInstall then begin\s+InstallDownloads;\s+RecordInstalledSize;') `
+    'RecordInstalledSize no longer runs after InstallDownloads'
+
+# The application rewrites EstimatedSize after a tier change, under the
+# key named after the AppId. A different GUID there would quietly update
+# nothing.
+$issAppId = if ($iss -match 'AppId=\{(\{[0-9A-F-]+\})') { $Matches[1] } else { $null }
+$ahkAppId = if ((Get-Content (Join-Path $root 'lib\Install.ahk') -Raw) -match 'return "(\{[0-9A-F-]+\})"') { $Matches[1] } else { $null }
+AssertTrue 'the AppId is readable in both the installer and lib\Install.ahk' ($issAppId -and $ahkAppId) `
+    "installer: '$issAppId', application: '$ahkAppId'"
+AssertEq 'the application and the installer name the same AppId' $issAppId $ahkAppId
+
 # Anything the .iss says it ships has to exist, or the build fails at a
 # much less obvious moment.
 $sources = [regex]::Matches($iss, 'Source:\s*"\.\.\\([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
@@ -200,6 +227,10 @@ if (Test-Path $ini) { Copy-Item $ini $backup -Force } elseif (Test-Path $backup)
 
 $target = Join-Path $env:TEMP ('WhispersInstallTest-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
 $setupLog = Join-Path $env:TEMP 'whispers-setup-test.log'
+$keeper   = Join-Path $env:TEMP 'whispers-install-keeper.ahk'
+$outsider = "$target-outsider"
+$standIns = @()
+$other    = $null
 
 try {
     # =================================================================
@@ -315,6 +346,16 @@ try {
         (-not (Test-Path (Join-Path $target 'Whispers.ini'))) `
         'an install-root INI would be lost on every upgrade'
 
+    Group 'Installed size'
+    # REGRESSION: Windows listed the install at 4.33 MB, the size of what
+    # Inno Setup shipped, while the downloads made it 3.9 GB.
+    $actualKb = [math]::Ceiling(((Get-ChildItem $target -Recurse -File -Force |
+                                  Measure-Object Length -Sum).Sum) / 1KB)
+    $shownKb = (Get-ItemProperty $regKey -EA SilentlyContinue).EstimatedSize
+    AssertTrue 'REGRESSION: the size Windows lists includes the downloads' `
+        ($shownKb -and ([math]::Abs($shownKb - $actualKb) -le $actualKb * 0.02)) `
+        "Windows lists $shownKb KB, the install root holds $actualKb KB"
+
     Group 'Shortcuts'
     $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Whispers\Whispers.lnk'
     AssertTrue 'a Start Menu shortcut was created' (Test-Path $startMenu) $startMenu
@@ -326,9 +367,37 @@ try {
     $uninst = Join-Path $target 'unins000.exe'
     AssertTrue 'an uninstaller was written' (Test-Path $uninst) $uninst
     if (Test-Path $uninst) {
+        # Stand-ins for a Whispers that is still running: the installed
+        # interpreter holding AutoHotkey64.exe, and the installed ffmpeg
+        # holding bin\. Plus the same interpreter copied OUTSIDE the
+        # install root, which is somebody else's AutoHotkey script and
+        # has to survive. Its directory shares the install root's prefix
+        # ("<root>-outsider"), so a match without the trailing backslash
+        # would kill it.
+        @('#Requires AutoHotkey v2.0', '#NoTrayIcon', 'Persistent()') -join "`r`n" |
+            Set-Content $keeper -Encoding Ascii
+        New-Item -ItemType Directory -Force -Path $outsider | Out-Null
+        Copy-Item (Join-Path $target 'AutoHotkey64.exe') $outsider
+        $standIns = @(
+            (Start-Process -FilePath (Join-Path $target 'AutoHotkey64.exe') -ArgumentList "`"$keeper`"" -PassThru),
+            (Start-Process -FilePath (Join-Path $target 'bin\ffmpeg.exe') -WindowStyle Hidden -PassThru `
+                -ArgumentList '-hide_banner -loglevel error -re -f lavfi -i anullsrc -f null -')
+        )
+        $other = Start-Process -FilePath (Join-Path $outsider 'AutoHotkey64.exe') -ArgumentList "`"$keeper`"" -PassThru
+        Start-Sleep -Seconds 2
+        AssertTrue 'the stand-ins for a running Whispers are up' `
+            (@($standIns + $other | Where-Object { $_.HasExited }).Count -eq 0) `
+            'a stand-in exited before the uninstall started'
+
         Start-Process -FilePath $uninst -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
         $deadline = (Get-Date).AddSeconds(90)
         while ((Test-Path $target) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
+        $survivors = @($standIns | Where-Object { $_.Refresh(); -not $_.HasExited })
+        AssertTrue 'REGRESSION: the uninstall stops the Whispers that was running' ($survivors.Count -eq 0) `
+            "still running from the install root: $(($survivors | ForEach-Object { $_.ProcessName }) -join ', ')"
+        $other.Refresh()
+        AssertTrue 'it stops only what runs from the install root' (-not $other.HasExited) `
+            'an AutoHotkey64.exe outside the install root was killed too'
         AssertTrue 'the install root is gone, including the downloaded files' (-not (Test-Path $target)) `
             "still present: $(@(Get-ChildItem $target -Recurse -EA SilentlyContinue).Count) items"
         AssertTrue 'the registration is gone' (-not (Test-Path $regKey)) $regKey
@@ -340,6 +409,12 @@ try {
     }
 }
 finally {
+    # A failed uninstall leaves the stand-ins running, and they hold the
+    # very files the line below deletes.
+    @($standIns + $other) | Where-Object { $_ -and -not $_.HasExited } |
+        ForEach-Object { Stop-Process -Id $_.Id -Force -EA SilentlyContinue; $_.WaitForExit(5000) | Out-Null }
+    Remove-Item $keeper -Force -EA SilentlyContinue
+    Remove-Item $outsider -Recurse -Force -EA SilentlyContinue
     Remove-Item $target -Recurse -Force -EA SilentlyContinue
     if (Test-Path $backup) {
         New-Item -ItemType Directory -Force -Path $dataDir | Out-Null

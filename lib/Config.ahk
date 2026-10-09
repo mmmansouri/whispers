@@ -46,6 +46,14 @@ ResolveDir(override, fallback) {
     return Trim(override) != "" ? Trim(override) : fallback
 }
 
+; Whether a directory setting still means "the one next to the script".
+; Whispers deletes files only in its own directories: an override points
+; at somebody else's, such as a whisper.cpp checkout with models of its
+; own.
+UsesDefaultDir(override) {
+    return Trim(override) = ""
+}
+
 ; Clamps a free-text integer into range, falling back when it is not a
 ; number at all. Never throws: a bad setting must not prevent startup.
 SanitizeInt(value, min, max, fallback) {

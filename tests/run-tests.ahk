@@ -23,6 +23,7 @@
 #Include %A_LineFile%\..\..\lib\Devices.ahk
 #Include %A_LineFile%\..\..\lib\Commands.ahk
 #Include %A_LineFile%\..\..\lib\Net.ahk
+#Include %A_LineFile%\..\..\lib\Install.ahk
 
 gPass := 0
 gFail := 0
@@ -223,6 +224,23 @@ Eq("TierField on an unknown field yields nothing", TierField(J, "max", "colour")
 Eq("TierField on an unknown tier yields nothing", TierField(J, "ludicrous", "file"), "")
 Eq("REGRESSION: TierField never reaches outside the tiers block",
    TierField(J, "cpu", "asset"), "")
+
+Group("Tiers - removing the previous model")
+
+; A tier change used to keep the previous model on disk, 3 GB for max.
+others := OtherTierFiles(J, "max")
+Eq("every other tier's model is a candidate", others.Length, 3)
+No("the model of the tier being kept never is", HasValue(others, "m.bin"))
+Yes("the cpu tier's model is a candidate", HasValue(others, "s.bin"))
+No("the cpu engine archive never is, despite sharing the name", HasValue(others, "whisper-blas-bin-x64.zip"))
+Eq("a tier that cannot be resolved removes nothing", OtherTierFiles(J, "turbo").Length, 0)
+Eq("an empty document removes nothing", OtherTierFiles("", "max").Length, 0)
+Eq("a document without tiers removes nothing",
+   OtherTierFiles('{"engine":{"variants":{"cpu":{"asset":"x"}}}}', "cpu").Length, 0)
+
+Yes("an empty models setting is Whispers' own directory", UsesDefaultDir(""))
+Yes("a cleared field is the default too", UsesDefaultDir("  "))
+No("an override is somebody else's directory, never pruned", UsesDefaultDir("C:\dev\whisper.cpp\models"))
 
 Group("Tiers - labels")
 
@@ -632,6 +650,23 @@ h := CmdHashFile("C:\t\a b.bin", "C:\t\h.log")
 Has("the file to hash is quoted", h, '"C:\t\a b.bin"')
 Has("SHA-256 is requested explicitly", h, " SHA256")
 Has("both streams go to the log", h, '> "C:\t\h.log" 2>&1')
+
+Group("Install - the entry Windows lists")
+
+Has("the uninstall entry is looked up per user", UninstallKey(), "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\")
+Has("it is Inno Setup's entry for this AppId", UninstallKey(), AppId() "_is1")
+Yes("Inno Setup's trailing backslash does not matter",
+    SameDir("C:\Users\me\AppData\Local\Whispers\", "C:\Users\me\AppData\Local\Whispers"))
+Yes("neither does case", SameDir("c:\users\me\appdata\local\whispers", "C:\Users\me\AppData\Local\Whispers"))
+No("a development checkout is not the installation",
+   SameDir("C:\Users\me\AppData\Local\Whispers\", "D:\Work\projects\whispers"))
+No("a sibling with a longer name is another directory", SameDir("C:\A\Whispers2", "C:\A\Whispers"))
+No("a missing location never matches", SameDir("", ""))
+
+Eq("sizes are recorded in KB", KbFromBytes(2048), 2)
+Eq("a partial KB rounds up", KbFromBytes(1025), 2)
+Eq("nothing is zero", KbFromBytes(0), 0)
+Eq("the max model fits a DWORD of KB", KbFromBytes(3095033483), 3022494)
 
 ; =====================================================================
 Report()

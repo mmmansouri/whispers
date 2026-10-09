@@ -48,9 +48,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 ; The archives are .zip, which only the "full" extraction method reads.
 ArchiveExtraction=full
 
-; A running Whispers holds AutoHotkey64.exe, and a running engine holds
-; the DLLs in bin\. Let Restart Manager notice and offer to close them
-; rather than failing halfway through on a locked file.
+; Restart Manager only watches the files listed in [Files]. The ones a
+; running Whispers actually holds - AutoHotkey64.exe and the engine in
+; bin\ - are copied by code, so StopRunningWhispers in [Code] is what
+; stops it, on install and on uninstall alike.
 CloseApplications=yes
 RestartApplications=no
 
@@ -193,6 +194,55 @@ begin
   if Result then
     Result := LoadStringsFromFile(LogFile, Lines);
   DeleteFile(LogFile);
+end;
+
+// ---------------------------------------------------------------------
+// Stopping a running Whispers
+//
+// A running Whispers survives its own uninstall otherwise. The script is
+// already in the interpreter's memory, so the hotkey keeps answering -
+// with ffmpeg deleted from under it, every dictation fails - and every
+// file a live process holds is left on disk. CloseApplications does not
+// cover it: Restart Manager runs for Setup only, and only watches files
+// listed in [Files], while the interpreter and the engine are copied by
+// code.
+//
+// Matched on the executable's path, never on a bare image name: the user
+// may run other AutoHotkey scripts, or an ffmpeg of their own, and those
+// are not ours to kill. Everything Whispers starts - the interpreter,
+// whisper-server, ffmpeg - runs from under {app}. The trailing backslash
+// keeps "Whispers2\" from matching "Whispers\".
+// ---------------------------------------------------------------------
+
+procedure StopRunningWhispers;
+var
+  Root, Cmd: String;
+  Code: Integer;
+begin
+  Root := AddBackslash(ExpandConstant('{app}'));
+  if not DirExists(Root) then
+    Exit;
+  // A single quote is legal in a Windows path and closes a PowerShell
+  // literal; doubling it is how PowerShell escapes it.
+  StringChangeEx(Root, '''', '''''', True);
+  Cmd := '$r = ''' + Root + '''; ' +
+         '$p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ' +
+         '$_.Path -and $_.Path.StartsWith($r, [StringComparison]::OrdinalIgnoreCase) }); ' +
+         '$p | Stop-Process -Force -ErrorAction SilentlyContinue; ' +
+         '$p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue';
+  if Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+          '-NoProfile -NonInteractive -Command "' + Cmd + '"',
+          '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Log('Stopped any Whispers process running from ' + Root + ' (exit ' + IntToStr(Code) + ')')
+  else
+    Log('Could not run PowerShell to stop Whispers: ' + SysErrorMessage(Code));
+end;
+
+// An install over a running copy would fail on the locked interpreter.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopRunningWhispers;
+  Result := '';
 end;
 
 // ---------------------------------------------------------------------
@@ -527,10 +577,63 @@ begin
     RaiseException('Could not place the model into ' + ExpandConstant('{app}\models'));
 end;
 
+// ---------------------------------------------------------------------
+// Installed size
+//
+// Inno Setup records the size of [Files] only - the script and the
+// uninstaller, about 4 MB - while everything that makes up the real
+// install is downloaded by code. "Installed apps" showed 4.33 MB for a
+// 3.9 GB install. The real figure depends on the tier and the engine, so
+// it is measured once the downloads have landed rather than written in
+// at compile time. The application measures it again when a tier change
+// adds or removes a model; lib\Install.ahk carries the same AppId.
+// ---------------------------------------------------------------------
+
+function DirSize(const Dir: String): Int64;
+var
+  FindRec: TFindRec;
+  SizeHi: Int64;
+begin
+  Result := 0;
+  if FindFirst(AddBackslash(Dir) + '*', FindRec) then begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
+          if FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0 then
+            Result := Result + DirSize(AddBackslash(Dir) + FindRec.Name)
+          else begin
+            SizeHi := FindRec.SizeHigh;
+            Result := Result + SizeHi * 65536 * 65536 + FindRec.SizeLow;
+          end;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
+procedure RecordInstalledSize;
+var
+  Key: String;
+  Kb: Cardinal;
+begin
+  // SetupSetting returns the AppId as written in [Setup], with its
+  // doubled opening brace; ExpandConstant turns that back into one.
+  Key := ExpandConstant('Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1');
+  Kb := (DirSize(ExpandConstant('{app}')) + 1023) div 1024;
+  if RegWriteDWordValue(HKA, Key, 'EstimatedSize', Kb) then
+    Log('Installed size recorded: ' + IntToStr(Kb) + ' KB')
+  else
+    Log('Could not record the installed size under ' + Key);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then
+  if CurStep = ssPostInstall then begin
     InstallDownloads;
+    RecordInstalledSize;
+  end;
 end;
 
 // ---------------------------------------------------------------------
@@ -541,6 +644,13 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
 begin
+  // usUninstall comes after the user confirmed and before anything is
+  // deleted: stopping Whispers any earlier would kill it for an
+  // uninstall that is then cancelled.
+  if CurUninstallStep = usUninstall then begin
+    StopRunningWhispers;
+    Exit;
+  end;
   if CurUninstallStep <> usPostUninstall then
     Exit;
   DataDir := ExpandConstant('{userappdata}\{#AppName}');

@@ -17,3 +17,6 @@
 # Drawn by tools/build-icons.ps1, committed as is.
 *.ico   binary
 *.png   binary
+
+# Synthesized by tools/build-sounds.ps1, committed as is.
+*.wav   binary

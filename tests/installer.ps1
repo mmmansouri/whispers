@@ -220,7 +220,8 @@ AssertTrue 'every file the .iss ships exists' ($missing.Count -eq 0) ($missing -
 # somebody forgot to add, not something a build would regenerate.
 $assets = @('Whispers.ico') +
           @('ready', 'recording', 'working', 'paused' | ForEach-Object { "tray\$_.ico" }) +
-          @(100, 125, 150, 175, 200 | ForEach-Object { "installer\wizard-$_.png", "installer\wizard-small-$_.png" })
+          @(100, 125, 150, 175, 200 | ForEach-Object { "installer\wizard-$_.png", "installer\wizard-small-$_.png" }) +
+          @('start', 'stop', 'done', 'error' | ForEach-Object { "sounds\$_.wav" })
 $absent = @($assets | Where-Object { -not (Test-Path (Join-Path $root "assets\$_")) })
 AssertTrue 'every brand asset is committed' ($absent.Count -eq 0) ($absent -join '; ')
 
@@ -237,8 +238,25 @@ if (Test-Path $icoPath) {
 }
 AssertEq 'Whispers.ico carries every size from 16 to 256 px' '16,20,24,32,40,48,64,256' ($icoSizes -join ',')
 
+# The sounds are cues, not jingles: a key press must not be answered by
+# something still playing when the user starts to speak. Plain PCM, which
+# PlaySound plays from memory without a codec.
+$long = @(Get-ChildItem (Join-Path $root 'assets\sounds') -Filter *.wav -EA SilentlyContinue | Where-Object {
+    $b = [System.IO.File]::ReadAllBytes($_.FullName)
+    $pcm = [BitConverter]::ToInt16($b, 20) -eq 1
+    $ms  = [BitConverter]::ToInt32($b, 40) * 1000 / [BitConverter]::ToInt32($b, 28)
+    -not $pcm -or $ms -gt 120
+} | ForEach-Object Name)
+AssertTrue 'every sound is PCM and at most 120 ms long' ($long.Count -eq 0) ($long -join '; ')
+
+# SoundBeep blocks the thread it runs on, inside StartRec's and StopRec's
+# Critical sections, and StopRec's played before the recorder was killed:
+# a microphone near speakers recorded it into the dictation.
+AssertTrue 'nothing blocks on a beep any more' `
+    ((Get-Content (Join-Path $root 'Whispers.ahk') -Raw) -notmatch 'SoundBeep\(') 'SoundBeep is back in Whispers.ahk'
+
 # Encoding discipline, same rule as every other Windows-only source.
-foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), $PSCommandPath)) {
+foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), (Join-Path $root 'tools\build-sounds.ps1'), $PSCommandPath)) {
     $bytes = [System.IO.File]::ReadAllBytes($f)
     $name  = Split-Path $f -Leaf
     AssertTrue "$name is ASCII" (@($bytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'non-ASCII bytes present'

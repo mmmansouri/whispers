@@ -82,7 +82,9 @@ The icons and the installer's images under `assets\` are drawn by
 `.	oolsuild-icons.ps1` and committed. The mark is drawn at every size
 rather than scaled down from one master, so the 16 px tray icon keeps
 four distinct bars; rerun the script after changing the drawing, and it
-writes byte-identical files when nothing changed.
+writes byte-identical files when nothing changed. The four sounds under
+`assets\sounds\` are synthesized the same way by
+`.\tools\build-sounds.ps1`: short sines, so there is no licence to track.
 
 ---
 
@@ -183,7 +185,7 @@ its own location.
   versions.json          pinned versions + SHA-256
   bin\                   whisper-server, whisper-cli, ffmpeg, DLLs
   models\                the one model for the selected tier
-  assets\                icons and installer images
+  assets\                icons, sounds and installer images
 
 %APPDATA%\Whispers\      Whispers.ini, logs\, history.tsv
 %TEMP%\Whispers\         capture scratch files
@@ -277,7 +279,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 95 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 99 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI

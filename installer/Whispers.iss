@@ -88,6 +88,8 @@ Source: "..\README.md";      DestDir: "{app}";     Flags: ignoreversion
 ; Drawn by tools\build-icons.ps1: the shortcuts' icon and the tray states.
 Source: "..\assets\Whispers.ico"; DestDir: "{app}\assets";      Flags: ignoreversion
 Source: "..\assets\tray\*.ico";   DestDir: "{app}\assets\tray"; Flags: ignoreversion
+; Synthesized by tools\build-sounds.ps1.
+Source: "..\assets\sounds\*.wav"; DestDir: "{app}\assets\sounds"; Flags: ignoreversion
 
 [INI]
 ; Seed the tier the user picked in the wizard. Every other setting keeps

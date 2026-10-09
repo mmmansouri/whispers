@@ -80,7 +80,7 @@ Raising a pin is manual and deliberate: edit `versions.json`, run the validation
 
 - `.ahk`, `.iss` and `.ps1` files are **pure ASCII with CRLF** line endings — asserted by the static installer suite, enforced on checkout by `.gitattributes`. No em dashes, arrows, accented characters or smart quotes in code or comments; write `-` and `->`.
 - Comments explain *why*, usually naming the concrete bug or measurement behind a decision. Match that density and tone when editing.
-- A bug that reached the running product gets a test marked `REGRESSION` and a row in the README table "What the REGRESSION assertions are for". README also states assertion counts per suite (unit 397, integration 53, installer 95) — update them when adding tests.
+- A bug that reached the running product gets a test marked `REGRESSION` and a row in the README table "What the REGRESSION assertions are for". README also states assertion counts per suite (unit 397, integration 53, installer 99) — update them when adding tests.
 - Every failure path reports the real cause via `Fail(msg, detail)` with the tail of the relevant log (`%APPDATA%\Whispers\logs\`), never a bare "failed".
 - Per-user only: no administrator rights anywhere (installer is `PrivilegesRequired=lowest`, server port clamped to ≥1024, loopback only).
 - User data lives outside the install root: `%APPDATA%\Whispers\` (INI, logs, `history.tsv`), scratch in `%TEMP%\Whispers\`. Both the integration and installer suites back up and restore the real INI.

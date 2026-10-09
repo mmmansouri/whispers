@@ -103,6 +103,7 @@ gLogView     := ""
 gReleaseTick := 0       ; A_TickCount when the dictation key went up
 gTrayState   := "idle"  ; last SetState, for the menu's status line
 gMenuFlush   := 0       ; uxtheme FlushMenuThemes, once the menu follows dark mode
+gSounds      := Map()   ; name -> the WAV file's bytes, see PlayCue
 ; Indicator (see its section). Sizes are logical px; IndSurface scales.
 IND_CANVAS_W := 600     ; widest pill (560) plus room for its glow
 IND_MARGIN   := 26      ; above and below the pill, for glow and shadow
@@ -168,6 +169,7 @@ ResolvePaths()
 ; makes Windows title them "Whispers" with our icon, not "AutoHotkey".
 DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "WStr", AppUserModelId())
 CreateIndicator()
+LoadSounds()
 LoadHistory()
 InitMenuTheme()
 ; The menu is rebuilt as it opens, so its status line and the model entry
@@ -217,8 +219,7 @@ if (Cfg["VramPolicy"] = "resident")
     StartServer("startup resident policy")
 
 SetState("idle")
-if (Cfg["PlaySounds"])
-    SoundBeep(800, 100)
+PlayCue("done")
 Notify(APP_NAME " is ready", "Hold " Cfg["Hotkey"] " to dictate in any app.")
 
 if (gFirstRun) {
@@ -678,7 +679,7 @@ StartRec(keyQpc := 0) {
         return
     }
 
-    ; AHK threads are interruptible at every RunWait/Sleep/SoundBeep. Without
+    ; AHK threads are interruptible at every RunWait/Sleep. Without
     ; Critical, the matching key-up fires StopRec in the middle of this
     ; function, and StartRec then resumes its tail *after* the transcription
     ; has already finished - re-arming state that StopRec just cleared.
@@ -706,8 +707,7 @@ StartRec(keyQpc := 0) {
     gRecStart := A_Now
     gRecMs := A_TickCount
 
-    if (Cfg["PlaySounds"])
-        SoundBeep(1500, 120)
+    PlayCue("start")
 
     Run(ShellCmd(CmdRecord(FFMPEG_EXE, Cfg["Mic"], TEMP_RAW, MIC_LOG)), ROOT_DIR, "Hide", &pid)
     gFfmpegPid := pid
@@ -758,8 +758,7 @@ StopRec() {
     gStopping := true
     gReleaseTick := A_TickCount
     LogMsg("DEBUG", "StopRec")
-    if (Cfg["PlaySounds"])
-        SoundBeep(800, 120)
+    PlayCue("stop")
 
     KillRecorder()
     Sleep(150)
@@ -919,8 +918,7 @@ DeliverText(text) {
     if (gWizEcho) {
         try gWizCtl["Heard"].Value := text
         AddHistory(text)
-        if (Cfg["PlaySounds"])
-            SoundBeep(1000, 60)
+        PlayCue("done")
         IndDone("Heard you", done)
         SetState(gPausedState())
         return
@@ -939,8 +937,7 @@ DeliverText(text) {
     }
 
     AddHistory(text)
-    if (Cfg["PlaySounds"])
-        SoundBeep(1000, 60)
+    PlayCue("done")
 
     IndDone(Cfg["AutoPaste"] ? "Pasted" : "Copied to the clipboard", done)
     ; The pill already says it; the toast is for those who turned it off.
@@ -1244,8 +1241,7 @@ Fail(msg, detail) {
     global Cfg
     LogMsg("ERROR", msg (detail != "" ? " | " detail : ""))
     IndError(msg, detail)
-    if (Cfg["PlaySounds"])
-        SoundBeep(300, 250)
+    PlayCue("error")
     ; The pill shows it where the user is looking; the full detail is in
     ; the log. Without the pill, a notification is the only trace.
     if !Cfg["ShowIndicator"]
@@ -1260,6 +1256,35 @@ Warn(msg) {
     if !Cfg["ShowIndicator"]
         Notify(msg)
     SetState(gPausedState())
+}
+
+; The four sounds tools\build-sounds.ps1 synthesizes, read once into
+; memory. Played from there asynchronously, they block nothing: SoundBeep
+; did, for up to 250 ms, and in StopRec the beep ran before the recorder
+; was killed, so a microphone near speakers recorded it into the dictation.
+LoadSounds() {
+    global gSounds, ROOT_DIR
+    for name in ["start", "stop", "done", "error"] {
+        try {
+            f := FileOpen(ROOT_DIR "\assets\sounds\" name ".wav", "r")
+            buf := Buffer(f.Length)
+            f.RawRead(buf, f.Length)
+            f.Close()
+            gSounds[name] := buf
+        } catch as e {
+            LogMsg("WARN", "Sound '" name "' not loaded: " e.Message)
+        }
+    }
+}
+
+; SND_ASYNC | SND_NODEFAULT | SND_MEMORY. The buffer stays in gSounds for
+; the life of the script, which SND_MEMORY with SND_ASYNC requires; a new
+; cue cuts off the one still playing, which is what a key press means.
+PlayCue(name) {
+    global Cfg, gSounds
+    if (!Cfg["PlaySounds"] || !gSounds.Has(name))
+        return
+    DllCall("winmm\PlaySoundW", "Ptr", gSounds[name], "Ptr", 0, "UInt", 0x0001 | 0x0002 | 0x0004)
 }
 
 ; A Windows notification, silent: Whispers never makes a sound the user
@@ -2002,7 +2027,7 @@ ShowSettings(startTab := 1) {
 
     gCtl["AutoPaste"] := g.Add("CheckBox", "xm+16 y+20", "Paste automatically after transcription")
     gCtl["AutoPaste"].Value := Cfg["AutoPaste"]
-    gCtl["PlaySounds"] := g.Add("CheckBox", "xm+16 y+8", "Play beeps")
+    gCtl["PlaySounds"] := g.Add("CheckBox", "xm+16 y+8", "Play sounds")
     gCtl["PlaySounds"].Value := Cfg["PlaySounds"]
     gCtl["ShowIndicator"] := g.Add("CheckBox", "xm+16 y+8", "Show on-screen recording indicator")
     gCtl["ShowIndicator"].Value := Cfg["ShowIndicator"]

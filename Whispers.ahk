@@ -10,6 +10,7 @@
 #Include %A_LineFile%\..\lib\Commands.ahk
 #Include %A_LineFile%\..\lib\Net.ahk
 #Include %A_LineFile%\..\lib\Install.ahk
+#Include %A_LineFile%\..\lib\Indicator.ahk
 
 ; =====================================================================
 ; Whispers - push-to-talk dictation powered by whisper.cpp
@@ -88,7 +89,6 @@ gBusy        := false
 gStopping    := false
 gRecStart    := ""
 gRecMs       := 0       ; A_TickCount at the start of a capture
-gRecTick     := 0
 gFfmpegPid   := 0
 gServerPid   := 0
 gLastUse     := 0
@@ -99,8 +99,35 @@ gSettingsGui := ""
 gCtl         := Map()
 gHistView    := ""
 gLogView     := ""
-gInd         := ""
-gIndText     := ""
+gReleaseTick := 0       ; A_TickCount when the dictation key went up
+; Indicator (see its section). Sizes are logical px; IndSurface scales.
+IND_CANVAS_W := 600     ; widest pill (560) plus room for its glow
+IND_MARGIN   := 26      ; above and below the pill, for glow and shadow
+gInd          := ""
+gIndG         := 0
+gIndDC        := 0
+gIndBmp       := 0
+gIndScale     := 0
+gIndPW        := 0
+gIndPH        := 0
+gIndX         := 0
+gIndY         := 0
+gIndFontTitle := 0
+gIndFontSmall := 0
+gIndFmt       := 0
+gIndState     := ""
+gIndTitle     := ""
+gIndSub       := ""
+gIndW         := 200
+gIndV         := 0
+gIndTargetW   := 200
+gIndVisible   := false
+gIndAlpha     := 0
+gIndRecT0     := 0
+gIndWarmT0    := 0
+gIndLevels    := []
+gIndLevelTick := 0
+gIndKeyQpc    := 0
 gGpu         := ""
 gUpdate      := ""      ; Map(tag,url,sha256,name) once one is found
 gDlCancel    := false
@@ -603,7 +630,7 @@ EnsureServerReady() {
             LogMsg("ERROR", "Server died while loading. " hint detail)
             return false
         }
-        IndSet("Loading model... " Round((A_TickCount - started) / 1000) "s", "C87A00")
+        IndWarm()
         Sleep(400)
     }
     LogMsg("ERROR", "Server did not answer within " Cfg["LoadTimeout"] "s. " TailFile(SRV_LOG))
@@ -624,8 +651,8 @@ CheckIdle() {
 ; =====================================================================
 ; Recording
 ; =====================================================================
-StartRec() {
-    global Cfg, gRecording, gPaused, gBusy, gStopping, gRecStart, gRecTick, gRecMs
+StartRec(keyQpc := 0) {
+    global Cfg, gRecording, gPaused, gBusy, gStopping, gRecStart, gRecMs
     global gFfmpegPid, TEMP_RAW, TEMP_WAV, TEMP_TXT, MIC_LOG, ROOT_DIR, FFMPEG_EXE
 
     ; gStopping closes the window between "gRecording := false" and the end
@@ -649,6 +676,9 @@ StartRec() {
     ; shows up as whisper inventing text over silence.
     LogMsg("DEBUG", "StartRec mic=" Cfg["Mic"])
 
+    ; Before anything slow: the pill is the user's proof the key worked.
+    IndListen(keyQpc)
+
     ; Kill any leftover recorder BEFORE starting a new one, and block on
     ; it: an asynchronous taskkill lands a few hundred ms later and
     ; silently murders the recorder we are about to spawn.
@@ -663,7 +693,6 @@ StartRec() {
 
     gRecStart := A_Now
     gRecMs := A_TickCount
-    gRecTick  := A_TickCount
 
     if (Cfg["PlaySounds"])
         SoundBeep(1500, 120)
@@ -673,8 +702,6 @@ StartRec() {
 
     gRecording := true
     SetState("rec")
-    IndShow()
-    SetTimer(TickIndicator, 100)
 
     ; Warm the model up while the user is still speaking, so the load time
     ; is hidden behind the recording instead of added to it. Deferred to its
@@ -707,7 +734,7 @@ KillRecorder() {
 
 ; Returns true only when a fresh WAV is ready to transcribe.
 StopRec() {
-    global Cfg, gRecording, gStopping, gRecMs, TEMP_RAW, TEMP_WAV, MIC_LOG, ROOT_DIR, FFMPEG_EXE
+    global Cfg, gRecording, gStopping, gRecMs, gReleaseTick, TEMP_RAW, TEMP_WAV, MIC_LOG, ROOT_DIR, FFMPEG_EXE
 
     if !gRecording
         return false
@@ -717,8 +744,8 @@ StopRec() {
     ; ffmpeg conversion), so the tray and timers stay responsive.
     Critical("On")
     gStopping := true
+    gReleaseTick := A_TickCount
     LogMsg("DEBUG", "StopRec")
-    SetTimer(TickIndicator, 0)
     if (Cfg["PlaySounds"])
         SoundBeep(800, 120)
 
@@ -747,7 +774,7 @@ StopRec() {
         return false
     }
 
-    IndSet("Converting...", "C87A00")
+    IndWork("Transcribing...")
 
     RunWait(ShellCmd(CmdConvert(FFMPEG_EXE, TEMP_RAW, TEMP_WAV, MIC_LOG, Cfg["TrimSilence"])), ROOT_DIR, "Hide")
 
@@ -758,11 +785,6 @@ StopRec() {
     }
     gStopping := false
     return true
-}
-
-TickIndicator() {
-    global gRecTick
-    IndSet(Format("Recording  {:.1f}s", (A_TickCount - gRecTick) / 1000), "B00000")
 }
 
 ; =====================================================================
@@ -785,18 +807,20 @@ Transcribe() {
     LogMsg("DEBUG", "Transcribe begin")
     gBusy := true
     SetState("work")
-    IndSet("Transcribing...", "C87A00")
+    IndWork("Transcribing...")
     try FileDelete(TEMP_TXT)
 
     text := ""
     if (Cfg["VramPolicy"] = "never") {
         text := TranscribeViaCli(false)
     } else {
-        if EnsureServerReady()
+        if EnsureServerReady() {
+            IndWork("Transcribing...")      ; after a warm-up
             text := TranscribeViaServer()
+        }
         if (text = "" && Cfg["CpuFallback"]) {
             LogMsg("WARN", "Server path failed, falling back to whisper-cli")
-            IndSet("GPU busy - CPU fallback...", "C87A00")
+            IndWork("Transcribing...", "GPU busy - using the CPU")
             text := TranscribeViaCli(true)
         }
     }
@@ -874,7 +898,8 @@ TranscribeViaCli(forceCpu) {
 }
 
 DeliverText(text) {
-    global Cfg, gWizEcho, gWizCtl
+    global Cfg, gWizEcho, gWizCtl, gReleaseTick
+    done := DoneSubline(WordCount(text), A_TickCount - gReleaseTick)
 
     ; While the setup window is open the transcription is shown there and
     ; goes nowhere else. The user is testing their microphone, not
@@ -884,8 +909,7 @@ DeliverText(text) {
         AddHistory(text)
         if (Cfg["PlaySounds"])
             SoundBeep(1000, 60)
-        IndSet("Done", "1E7A1E")
-        SetTimer(IndHide, -900)
+        IndDone("Heard you", done)
         SetState(gPausedState())
         return
     }
@@ -906,10 +930,12 @@ DeliverText(text) {
     if (Cfg["PlaySounds"])
         SoundBeep(1000, 60)
 
-    preview := PreviewText(text)
-    IndSet("Done", "1E7A1E")
-    SetTimer(IndHide, -900)
-    Toast(Cfg["AutoPaste"] ? "Pasted: " preview : "Copied: " preview, 2200)
+    IndDone(Cfg["AutoPaste"] ? "Pasted" : "Copied to the clipboard", done)
+    ; The pill already says it; the toast is for those who turned it off.
+    if !Cfg["ShowIndicator"] {
+        preview := PreviewText(text)
+        Toast(Cfg["AutoPaste"] ? "Pasted: " preview : "Copied: " preview, 2200)
+    }
     SetState(gPausedState())
 }
 
@@ -1205,8 +1231,7 @@ InstallUpdate(*) {
 Fail(msg, detail) {
     global Cfg
     LogMsg("ERROR", msg (detail != "" ? " | " detail : ""))
-    IndSet(msg, "8B0000")
-    SetTimer(IndHide, -4500)
+    IndError(msg, detail)
     if (Cfg["PlaySounds"])
         SoundBeep(300, 250)
     Toast(msg (detail != "" ? "`n" detail : ""), 5000)
@@ -1215,8 +1240,7 @@ Fail(msg, detail) {
 
 Warn(msg) {
     LogMsg("WARN", msg)
-    IndSet(msg, "8A6D00")
-    SetTimer(IndHide, -2500)
+    IndWarn(msg)
     Toast(msg, 2500)
     SetState(gPausedState())
 }
@@ -1227,39 +1251,454 @@ Toast(msg, duration := 2000) {
 }
 
 ; =====================================================================
-; Recording indicator (click-through, always on top)
+; Indicator: the glass pill above the taskbar (ADR-0002)
+;
+; A layered window that GDI+ draws with per-pixel alpha. There is no
+; backdrop blur on purpose: DWM's acrylic fills the whole window
+; rectangle whatever its shape (measured, see the ADR), so the glass is
+; a dense tint with a highlight and a rim instead.
+;
+; The window is created per-monitor DPI aware, so it draws at physical
+; pixels on every monitor instead of being bitmap-stretched by Windows.
+; Its frame timer runs only while the pill is on screen or fading out,
+; and the window is hidden in between: a visible topmost window, even a
+; transparent one, can knock a fullscreen game out of its fast path.
 ; =====================================================================
 CreateIndicator() {
-    global gInd, gIndText, APP_NAME
-    gInd := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x20 -DPIScale", APP_NAME "Indicator")
-    gInd.BackColor := "202020"
-    gInd.MarginX := 0
-    gInd.MarginY := 0
-    gInd.SetFont("s11 Bold cFFFFFF", "Segoe UI")
-    gIndText := gInd.Add("Text", "w300 h34 Center +0x200", "Ready")
+    global gInd, gIndFontTitle, gIndFontSmall, gIndFmt, APP_NAME
+    DllCall("LoadLibrary", "Str", "gdiplus", "Ptr")
+    si := Buffer(24, 0)
+    NumPut("UInt", 1, si)
+    if DllCall("gdiplus\GdiplusStartup", "Ptr*", &tok := 0, "Ptr", si, "Ptr", 0) {
+        LogMsg("WARN", "GDI+ did not start - no on-screen indicator")
+        return
+    }
+    old := DllCall("SetThreadDpiAwarenessContext", "Ptr", -4, "Ptr")
+    ; WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE: click-through,
+    ; and never takes the focus away from where the text is going.
+    gInd := Gui("+AlwaysOnTop -Caption +ToolWindow -DPIScale +E0x80000 +E0x20 +E0x08000000", APP_NAME "Indicator")
+    if (old)
+        DllCall("SetThreadDpiAwarenessContext", "Ptr", old, "Ptr")
+    gIndFontTitle := GpFont("Segoe UI Semibold", 14)
+    gIndFontSmall := GpFont("Segoe UI", 12)
+    DllCall("gdiplus\GdipCreateStringFormat", "Int", 0x1000, "UShort", 0, "Ptr*", &fmt := 0)   ; NoWrap
+    DllCall("gdiplus\GdipSetStringFormatLineAlign", "Ptr", fmt, "Int", 1)
+    DllCall("gdiplus\GdipSetStringFormatTrimming", "Ptr", fmt, "Int", 3)                       ; ellipsis
+    gIndFmt := fmt
 }
 
-IndShow() {
-    global gInd, Cfg
-    if !Cfg["ShowIndicator"]
-        return
-    x := (A_ScreenWidth - 300) // 2
-    y := A_ScreenHeight - 160
-    gInd.Show(Format("x{} y{} w300 h34 NoActivate", x, y))
+; --- what the rest of the script calls ------------------------------
+
+; Shown first thing on key-down, before the recorder is even spawned.
+IndListen(keyQpc := 0) {
+    global gIndRecT0, gIndLevels, gIndLevelTick, gIndKeyQpc
+    gIndRecT0 := A_TickCount
+    gIndLevels := []
+    ; Not sampled before 50 ms: until StartRec has deleted it, the capture
+    ; on disk is the previous dictation's.
+    gIndLevelTick := A_TickCount
+    gIndKeyQpc := keyQpc
+    IndSetState("listen", "", "", true)
+}
+
+IndWarm() {
+    global gIndWarmT0, gIndState
+    if (gIndState != "warm")
+        gIndWarmT0 := A_TickCount
+    IndSetState("warm", "Waking up the model", "")
+}
+
+IndWork(title, sub := "") => IndSetState("work", title, sub)
+
+IndDone(title, sub) {
+    IndSetState("done", title, sub)
+    SetTimer(IndHide, -1400)
+}
+
+IndError(msg, detail) {
+    IndSetState("error", msg, ErrorSubline(detail))
+    SetTimer(IndHide, -4500)
+}
+
+IndWarn(msg) {
+    IndSetState("warn", msg, "")
+    SetTimer(IndHide, -2500)
 }
 
 IndHide() {
-    global gInd
-    try gInd.Hide()
+    global gIndVisible
+    gIndVisible := false
 }
 
-IndSet(msg, color) {
-    global gInd, gIndText, Cfg
-    if !Cfg["ShowIndicator"]
+; --- state and placement --------------------------------------------
+
+IndSetState(state, title, sub, place := false) {
+    global gInd, Cfg, gIndState, gIndTitle, gIndSub, gIndTargetW, gIndW, gIndV
+    global gIndVisible, gIndAlpha, gIndG
+    if (!gInd || !Cfg["ShowIndicator"])
         return
-    gInd.BackColor := color
-    gIndText.Value := msg
-    IndShow()
+    ; A new state cancels the hide a previous one scheduled, or a failure
+    ; shown 4 s ago would whisk away the pill of the next dictation.
+    SetTimer(IndHide, 0)
+    wasHidden := !gIndVisible && gIndAlpha = 0
+    if (place || wasHidden)
+        IndPlace()
+    gIndState := state
+    gIndTitle := title
+    gIndSub := sub
+    textW := Max(GpMeasure(title, gIndFontTitle), GpMeasure(sub, gIndFontSmall))
+    gIndTargetW := IndicatorFitWidth(state, textW)
+    if (wasHidden) {
+        ; Appears at its final width; only changes of state morph.
+        gIndW := gIndTargetW
+        gIndV := 0
+    }
+    gIndVisible := true
+    if wasHidden
+        gInd.Show("NA")
+    IndFrame()
+    SetTimer(IndFrame, 15)
+}
+
+; Puts the pill on the monitor the user is working on, and rebuilds the
+; drawing surface when that monitor has a different scale.
+IndPlace() {
+    global gInd, gIndX, gIndY, gIndScale, gIndPW, gIndPH, IND_CANVAS_W, IND_MARGIN
+    old := DllCall("SetThreadDpiAwarenessContext", "Ptr", -4, "Ptr")
+    hmon := DllCall("MonitorFromWindow", "Ptr", DllCall("GetForegroundWindow", "Ptr"), "UInt", 2, "Ptr")
+    mi := Buffer(40, 0)
+    NumPut("UInt", 40, mi)
+    DllCall("GetMonitorInfoW", "Ptr", hmon, "Ptr", mi)
+    dpi := 96
+    try DllCall("shcore\GetDpiForMonitor", "Ptr", hmon, "Int", 0, "UInt*", &dpi, "UInt*", &dpiY := 0)
+    if (old)
+        DllCall("SetThreadDpiAwarenessContext", "Ptr", old, "Ptr")
+    scale := dpi / 96
+    if (scale != gIndScale)
+        IndSurface(scale)
+    at := IndicatorAnchor(NumGet(mi, 20, "Int"), NumGet(mi, 28, "Int"), NumGet(mi, 32, "Int"), gIndPW, gIndPH, scale)
+    gIndX := at[1]
+    gIndY := at[2]
+}
+
+IndSurface(scale) {
+    global gIndScale, gIndPW, gIndPH, gIndDC, gIndBmp, gIndG, IND_CANVAS_W, IND_MARGIN
+    if (gIndG) {
+        DllCall("gdiplus\GdipDeleteGraphics", "Ptr", gIndG)
+        DllCall("DeleteObject", "Ptr", gIndBmp)
+        DllCall("DeleteDC", "Ptr", gIndDC)
+    }
+    gIndScale := scale
+    gIndPW := Round(IND_CANVAS_W * scale)
+    gIndPH := Round((IndicatorHeight() + 2 * IND_MARGIN) * scale)
+    bi := Buffer(40, 0)
+    NumPut("UInt", 40, bi, 0), NumPut("Int", gIndPW, bi, 4), NumPut("Int", -gIndPH, bi, 8)
+    NumPut("UShort", 1, bi, 12), NumPut("UShort", 32, bi, 14)
+    screen := DllCall("GetDC", "Ptr", 0, "Ptr")
+    gIndDC := DllCall("CreateCompatibleDC", "Ptr", screen, "Ptr")
+    gIndBmp := DllCall("CreateDIBSection", "Ptr", gIndDC, "Ptr", bi, "UInt", 0, "Ptr*", &bits := 0, "Ptr", 0, "UInt", 0, "Ptr")
+    DllCall("ReleaseDC", "Ptr", 0, "Ptr", screen)
+    DllCall("SelectObject", "Ptr", gIndDC, "Ptr", gIndBmp)
+    DllCall("gdiplus\GdipCreateFromHDC", "Ptr", gIndDC, "Ptr*", &g := 0)
+    gIndG := g
+    DllCall("gdiplus\GdipSetSmoothingMode", "Ptr", g, "Int", 4)       ; AntiAlias
+    DllCall("gdiplus\GdipSetPixelOffsetMode", "Ptr", g, "Int", 4)     ; Half
+    ; ClearType needs an opaque background; on per-pixel alpha it fringes.
+    DllCall("gdiplus\GdipSetTextRenderingHint", "Ptr", g, "Int", 4)   ; AntiAlias
+}
+
+; --- the frame -------------------------------------------------------
+
+IndFrame() {
+    ; Critical for the duration of one frame (well under 2 ms): a key-down
+    ; landing mid-frame would draw a second frame into the same surface
+    ; half way through this one. Restored, not switched off, because
+    ; StartRec draws the first frame from inside its own Critical section.
+    prev := A_IsCritical
+    Critical("On")
+    IndFrameDraw()
+    Critical(prev)
+}
+
+IndFrameDraw() {
+    global gInd, gIndG, gIndState, gIndTitle, gIndSub, gIndW, gIndV, gIndTargetW
+    global gIndVisible, gIndAlpha, gIndScale, gIndKeyQpc, IND_CANVAS_W, IND_MARGIN
+    r := SpringStep(gIndW, gIndV, gIndTargetW)
+    gIndW := r[1]
+    gIndV := r[2]
+    gIndAlpha := FadeStep(gIndAlpha, gIndVisible)
+    if (!gIndVisible && gIndAlpha = 0) {
+        SetTimer(IndFrame, 0)
+        IndPresent(0)
+        gInd.Hide()
+        return
+    }
+    if (gIndState = "listen")
+        IndSampleLevel()
+
+    g := gIndG
+    t := A_TickCount / 1000.0
+    DllCall("gdiplus\GdipGraphicsClear", "Ptr", g, "UInt", 0)
+    DllCall("gdiplus\GdipResetWorldTransform", "Ptr", g)
+    DllCall("gdiplus\GdipScaleWorldTransform", "Ptr", g, "Float", gIndScale, "Float", gIndScale, "Int", 0)
+
+    h := IndicatorHeight()
+    w := Max(gIndW, h)
+    x := (IND_CANVAS_W - w) / 2
+    y := IND_MARGIN
+    lvl := IndLevelNow(t)
+
+    ; Shadow, then the glow, as stacks of faint pills: GDI+ has no blur.
+    loop 8
+        GpFillPill(x - A_Index, y + 6 - A_Index * 0.5, w + 2 * A_Index, h + A_Index, 0x0A000000)
+    if (gIndState = "listen") {
+        a := Round(5 + 9 * lvl)
+        loop 10
+            GpFillPill(x - A_Index * 1.8, y - A_Index * 1.2, w + A_Index * 3.6, h + A_Index * 2.4, (a << 24) | 0x7C5CFF)
+    } else if (gIndState = "error") {
+        loop 8
+            GpFillPill(x - A_Index * 1.8, y - A_Index * 1.2, w + A_Index * 3.6, h + A_Index * 2.4, 0x09FF7A45)
+    }
+
+    ; The glass: dense enough for white text over anything (ADR-0002).
+    GpFillPill(x, y, w, h, 0xB8181820)
+    p := GpRRectPath(x, y, w, h, h / 2)
+    DllCall("gdiplus\GdipSetClipPath", "Ptr", g, "Ptr", p, "Int", 0)
+    rc := GpRectF(x + 14, y + 1, w - 28, 24)
+    DllCall("gdiplus\GdipCreateLineBrushFromRect", "Ptr", rc, "UInt", 0x55FFFFFF, "UInt", 0x00FFFFFF, "Int", 1, "Int", 1, "Ptr*", &br := 0)
+    hp := GpRRectPath(x + 14, y + 1, w - 28, 24, 12)
+    DllCall("gdiplus\GdipFillPath", "Ptr", g, "Ptr", br, "Ptr", hp)
+    DllCall("gdiplus\GdipDeletePath", "Ptr", hp)
+    DllCall("gdiplus\GdipDeleteBrush", "Ptr", br)
+
+    IndContent(x, y, w, t)
+
+    DllCall("gdiplus\GdipResetClip", "Ptr", g)
+    GpStrokePath(p, 0x40FFFFFF, 1)
+    DllCall("gdiplus\GdipDeletePath", "Ptr", p)
+
+    IndPresent(Round(255 * gIndAlpha))
+
+    if (gIndKeyQpc) {
+        DllCall("QueryPerformanceCounter", "Int64*", &q := 0)
+        DllCall("QueryPerformanceFrequency", "Int64*", &f := 0)
+        LogMsg("DEBUG", Format("Indicator on screen {:.1f} ms after key-down", (q - gIndKeyQpc) * 1000 / f))
+        gIndKeyQpc := 0
+    }
+}
+
+IndContent(x, y, w, t) {
+    global gIndState, gIndTitle, gIndSub, gIndRecT0, gIndWarmT0, gIndLevels, gIndFontTitle, gIndFontSmall, Cfg
+    h := IndicatorHeight()
+    cx := x + 29
+    cy := y + h / 2
+    tx := x + 56
+    tw := w - 56 - 22
+    switch gIndState {
+        case "listen":
+            rc := GpRectF(cx - 17, cy - 17, 34, 34)
+            DllCall("gdiplus\GdipCreateLineBrushFromRectWithAngle", "Ptr", rc, "UInt", 0xFF7C5CFF, "UInt", 0xFF3DD6F5, "Float", Mod(t * 150, 360), "Int", 1, "Int", 0, "Ptr*", &br := 0)
+            DllCall("gdiplus\GdipFillEllipse", "Ptr", IndG(), "Ptr", br, "Float", cx - 17, "Float", cy - 17, "Float", 34, "Float", 34)
+            DllCall("gdiplus\GdipDeleteBrush", "Ptr", br)
+            GpFillEllipse(cx - 14, cy - 14, 28, 28, 0x8C0F0F19)
+            IndMicGlyph(cx, cy)
+            n := 26
+            step := (w - 56 - 60) / n
+            heights := BarHeights(gIndLevels, n, 4, 28)
+            for i, bh in heights {
+                ; A little shimmer on top of the voice, so silence still
+                ; reads as "listening" rather than as frozen.
+                bh += 2 * Abs(Sin(t * 6 + i * 0.9))
+                GpFillRRect(tx + 2 + (i - 1) * step, cy - bh / 2, 3, bh, 1.5, i & 1 ? 0xFFFFFFFF : 0xFFBDF2FC)
+            }
+            secs := (A_TickCount - gIndRecT0) // 1000
+            GpText(Format("{}:{:02}", secs // 60, Mod(secs, 60)), gIndFontTitle, 0xF2FFFFFF, x + w - 60, y, 42, h, 2)
+        case "warm":
+            IndSpinner(cx, cy, t)
+            GpText(gIndTitle, gIndFontTitle, 0xFFFFFFFF, tx, y + 7, tw - 70, 24, 0)
+            GpFillRRect(tx, y + 36, tw - 70, 4, 2, 0x29FFFFFF)
+            GpFillRRect(tx, y + 36, (tw - 70) * WarmProgress(A_TickCount - gIndWarmT0), 4, 2, 0xFF3DD6F5)
+            GpText(ModelShortName(TierFile(Cfg["Tier"])), gIndFontSmall, 0xBFFFFFFF, x + w - 92, y, 70, h, 2)
+        case "work":
+            IndSpinner(cx, cy, t)
+            a := Round(150 + 105 * (0.5 + 0.5 * Sin(t * 5)))
+            if (gIndSub = "") {
+                GpText(gIndTitle, gIndFontTitle, (a << 24) | 0xFFFFFF, tx, y, tw, h, 0)
+            } else {
+                GpText(gIndTitle, gIndFontTitle, (a << 24) | 0xFFFFFF, tx, y + 7, tw, 22, 0)
+                GpText(gIndSub, gIndFontSmall, 0xBFFFFFFF, tx, y + 27, tw, 20, 0)
+            }
+        case "done":
+            GpFillEllipse(cx - 17, cy - 17, 34, 34, 0xFF2FBF8F)
+            DllCall("gdiplus\GdipCreatePen1", "UInt", 0xFFFFFFFF, "Float", 3, "Int", 0, "Ptr*", &pen := 0)
+            DllCall("gdiplus\GdipSetPenStartCap", "Ptr", pen, "Int", 2)
+            DllCall("gdiplus\GdipSetPenEndCap", "Ptr", pen, "Int", 2)
+            DllCall("gdiplus\GdipDrawLine", "Ptr", IndG(), "Ptr", pen, "Float", cx - 7, "Float", cy + 0.5, "Float", cx - 2.5, "Float", cy + 5)
+            DllCall("gdiplus\GdipDrawLine", "Ptr", IndG(), "Ptr", pen, "Float", cx - 2.5, "Float", cy + 5, "Float", cx + 7, "Float", cy - 4.5)
+            DllCall("gdiplus\GdipDeletePen", "Ptr", pen)
+            IndTwoLines(tx, y, tw)
+        case "error", "warn":
+            GpFillEllipse(cx - 17, cy - 17, 34, 34, gIndState = "error" ? 0xFFE8590C : 0xFFB7791F)
+            GpFillRRect(cx - 1.5, cy - 9, 3, 11, 1.5, 0xFFFFFFFF)
+            GpFillEllipse(cx - 2, cy + 5, 4, 4, 0xFFFFFFFF)
+            IndTwoLines(tx, y, tw)
+    }
+}
+
+IndTwoLines(tx, y, tw) {
+    global gIndTitle, gIndSub, gIndFontTitle, gIndFontSmall
+    h := IndicatorHeight()
+    if (gIndSub = "") {
+        GpText(gIndTitle, gIndFontTitle, 0xFFFFFFFF, tx, y, tw, h, 0)
+        return
+    }
+    GpText(gIndTitle, gIndFontTitle, 0xFFFFFFFF, tx, y + 7, tw, 22, 0)
+    GpText(gIndSub, gIndFontSmall, 0xCCFFFFFF, tx, y + 27, tw, 20, 0)
+}
+
+IndG() {
+    global gIndG
+    return gIndG
+}
+
+IndSpinner(cx, cy, t) {
+    DllCall("gdiplus\GdipCreatePen1", "UInt", 0x2EFFFFFF, "Float", 3, "Int", 0, "Ptr*", &pen := 0)
+    DllCall("gdiplus\GdipDrawEllipse", "Ptr", IndG(), "Ptr", pen, "Float", cx - 14, "Float", cy - 14, "Float", 28, "Float", 28)
+    DllCall("gdiplus\GdipDeletePen", "Ptr", pen)
+    DllCall("gdiplus\GdipCreatePen1", "UInt", 0xFF3DD6F5, "Float", 3, "Int", 0, "Ptr*", &pen := 0)
+    DllCall("gdiplus\GdipSetPenStartCap", "Ptr", pen, "Int", 2)
+    DllCall("gdiplus\GdipSetPenEndCap", "Ptr", pen, "Int", 2)
+    DllCall("gdiplus\GdipDrawArc", "Ptr", IndG(), "Ptr", pen, "Float", cx - 14, "Float", cy - 14, "Float", 28, "Float", 28, "Float", Mod(t * 400, 360), "Float", 100)
+    DllCall("gdiplus\GdipDeletePen", "Ptr", pen)
+}
+
+IndMicGlyph(cx, cy) {
+    DllCall("gdiplus\GdipCreatePen1", "UInt", 0xFFFFFFFF, "Float", 1.8, "Int", 0, "Ptr*", &pen := 0)
+    DllCall("gdiplus\GdipSetPenStartCap", "Ptr", pen, "Int", 2)
+    DllCall("gdiplus\GdipSetPenEndCap", "Ptr", pen, "Int", 2)
+    p := GpRRectPath(cx - 3, cy - 8, 6, 10, 3)
+    DllCall("gdiplus\GdipDrawPath", "Ptr", IndG(), "Ptr", pen, "Ptr", p)
+    DllCall("gdiplus\GdipDeletePath", "Ptr", p)
+    DllCall("gdiplus\GdipDrawArc", "Ptr", IndG(), "Ptr", pen, "Float", cx - 6, "Float", cy - 6, "Float", 12, "Float", 11, "Float", 0, "Float", 180)
+    DllCall("gdiplus\GdipDrawLine", "Ptr", IndG(), "Ptr", pen, "Float", cx, "Float", cy + 5, "Float", cx, "Float", cy + 8)
+    DllCall("gdiplus\GdipDeletePen", "Ptr", pen)
+}
+
+IndPresent(alpha) {
+    global gInd, gIndDC, gIndX, gIndY, gIndPW, gIndPH
+    pt := Buffer(8), NumPut("Int", gIndX, "Int", gIndY, pt)
+    sz := Buffer(8), NumPut("Int", gIndPW, "Int", gIndPH, sz)
+    src := Buffer(8, 0)
+    blend := Buffer(4), NumPut("UChar", 0, "UChar", 0, "UChar", alpha, "UChar", 1, blend)   ; AC_SRC_ALPHA
+    DllCall("UpdateLayeredWindow", "Ptr", gInd.Hwnd, "Ptr", 0, "Ptr", pt, "Ptr", sz, "Ptr", gIndDC, "Ptr", src, "UInt", 0, "Ptr", blend, "UInt", 2)
+}
+
+; --- the voice --------------------------------------------------------
+
+; Every 50 ms, the loudness of the last 50 ms of the capture ffmpeg is
+; writing (it flushes every packet, so the tail is current).
+IndSampleLevel() {
+    global gIndLevels, gIndLevelTick, TEMP_RAW
+    if (A_TickCount - gIndLevelTick < 50)
+        return
+    gIndLevelTick := A_TickCount
+    level := -1
+    ; Runs inside the frame's Critical section, and must: StartRec deletes
+    ; the previous capture before spawning ffmpeg, and a key-down landing
+    ; while this handle is open would leave that delete pending, so ffmpeg
+    ; could not create the new file and the dictation would fail as "Mic
+    ; capture failed". The open-read-close takes well under a millisecond.
+    try {
+        f := FileOpen(TEMP_RAW, "r")
+        if (f.Length >= 1600) {
+            f.Pos := (f.Length - 1600) & ~1
+            buf := Buffer(1600)
+            level := LevelFromRms(S16Rms(buf, f.RawRead(buf, 1600)))
+        }
+        f.Close()
+    }
+    if (level >= 0) {
+        gIndLevels.Push(level)
+        if (gIndLevels.Length > 26)
+            gIndLevels.RemoveAt(1)
+    }
+}
+
+; The glow follows the newest level; before the first one arrives (or if
+; the capture cannot be read) it breathes slowly instead.
+IndLevelNow(t) {
+    global gIndLevels
+    if (gIndLevels.Length)
+        return gIndLevels[gIndLevels.Length]
+    return 0.35 + 0.25 * Sin(t * 2.4)
+}
+
+; --- GDI+ helpers ------------------------------------------------------
+
+GpFont(name, px) {
+    fam := 0
+    if DllCall("gdiplus\GdipCreateFontFamilyFromName", "WStr", name, "Ptr", 0, "Ptr*", &fam)
+        DllCall("gdiplus\GdipCreateFontFamilyFromName", "WStr", "Segoe UI", "Ptr", 0, "Ptr*", &fam)
+    DllCall("gdiplus\GdipCreateFont", "Ptr", fam, "Float", px, "Int", 0, "Int", 2, "Ptr*", &f := 0)   ; UnitPixel
+    return f
+}
+
+GpRectF(x, y, w, h) {
+    b := Buffer(16)
+    NumPut("Float", x, "Float", y, "Float", w, "Float", h, b)
+    return b
+}
+
+GpRRectPath(x, y, w, h, r) {
+    DllCall("gdiplus\GdipCreatePath", "Int", 0, "Ptr*", &p := 0)
+    d := Min(2 * r, w, h)
+    DllCall("gdiplus\GdipAddPathArc", "Ptr", p, "Float", x, "Float", y, "Float", d, "Float", d, "Float", 180, "Float", 90)
+    DllCall("gdiplus\GdipAddPathArc", "Ptr", p, "Float", x + w - d, "Float", y, "Float", d, "Float", d, "Float", 270, "Float", 90)
+    DllCall("gdiplus\GdipAddPathArc", "Ptr", p, "Float", x + w - d, "Float", y + h - d, "Float", d, "Float", d, "Float", 0, "Float", 90)
+    DllCall("gdiplus\GdipAddPathArc", "Ptr", p, "Float", x, "Float", y + h - d, "Float", d, "Float", d, "Float", 90, "Float", 90)
+    DllCall("gdiplus\GdipClosePathFigure", "Ptr", p)
+    return p
+}
+
+GpFillRRect(x, y, w, h, r, argb) {
+    p := GpRRectPath(x, y, w, h, r)
+    DllCall("gdiplus\GdipCreateSolidFill", "UInt", argb, "Ptr*", &br := 0)
+    DllCall("gdiplus\GdipFillPath", "Ptr", IndG(), "Ptr", br, "Ptr", p)
+    DllCall("gdiplus\GdipDeleteBrush", "Ptr", br)
+    DllCall("gdiplus\GdipDeletePath", "Ptr", p)
+}
+
+GpFillPill(x, y, w, h, argb) => GpFillRRect(x, y, w, h, h / 2, argb)
+
+GpStrokePath(p, argb, width) {
+    DllCall("gdiplus\GdipCreatePen1", "UInt", argb, "Float", width, "Int", 0, "Ptr*", &pen := 0)
+    DllCall("gdiplus\GdipDrawPath", "Ptr", IndG(), "Ptr", pen, "Ptr", p)
+    DllCall("gdiplus\GdipDeletePen", "Ptr", pen)
+}
+
+GpFillEllipse(x, y, w, h, argb) {
+    DllCall("gdiplus\GdipCreateSolidFill", "UInt", argb, "Ptr*", &br := 0)
+    DllCall("gdiplus\GdipFillEllipse", "Ptr", IndG(), "Ptr", br, "Float", x, "Float", y, "Float", w, "Float", h)
+    DllCall("gdiplus\GdipDeleteBrush", "Ptr", br)
+}
+
+GpText(str, font, argb, x, y, w, h, align) {
+    global gIndFmt
+    DllCall("gdiplus\GdipCreateSolidFill", "UInt", argb, "Ptr*", &br := 0)
+    DllCall("gdiplus\GdipSetStringFormatAlign", "Ptr", gIndFmt, "Int", align)
+    DllCall("gdiplus\GdipDrawString", "Ptr", IndG(), "WStr", str, "Int", -1, "Ptr", font, "Ptr", GpRectF(x, y, w, h), "Ptr", gIndFmt, "Ptr", br)
+    DllCall("gdiplus\GdipDeleteBrush", "Ptr", br)
+}
+
+; Width in logical px of one line of text, for sizing the pill to it.
+GpMeasure(str, font) {
+    global gIndFmt
+    if (str = "" || !IndG())
+        return 0
+    box := Buffer(16, 0)
+    DllCall("gdiplus\GdipSetStringFormatAlign", "Ptr", gIndFmt, "Int", 0)
+    DllCall("gdiplus\GdipMeasureString", "Ptr", IndG(), "WStr", str, "Int", -1, "Ptr", font, "Ptr", GpRectF(0, 0, 2000, 60), "Ptr", gIndFmt, "Ptr", box, "Ptr", 0, "Ptr", 0)
+    return NumGet(box, 8, "Float")
 }
 
 ; =====================================================================
@@ -1287,7 +1726,9 @@ ApplyHotkey(key) {
 }
 
 HkDown(*) {
-    StartRec()
+    ; Taken first, so the indicator can log how long it took to appear.
+    DllCall("QueryPerformanceCounter", "Int64*", &keyQpc := 0)
+    StartRec(keyQpc)
 }
 
 HkUp(*) {
@@ -1375,10 +1816,12 @@ ToggleServer(*) {
         Toast("Model unloaded - VRAM released", 2500)
     } else {
         Toast("Loading model...", 2000)
-        if EnsureServerReady() {
+        ok := EnsureServerReady()
+        ; EnsureServerReady shows the warm-up pill; nothing else will
+        ; replace it when the load was asked for from the tray.
+        IndHide()
+        if ok
             Toast("Model loaded and resident", 2500)
-            IndHide()
-        }
     }
     BuildTray()
 }

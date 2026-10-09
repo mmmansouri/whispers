@@ -24,6 +24,7 @@
 #Include %A_LineFile%\..\..\lib\Commands.ahk
 #Include %A_LineFile%\..\..\lib\Net.ahk
 #Include %A_LineFile%\..\..\lib\Install.ahk
+#Include %A_LineFile%\..\..\lib\Indicator.ahk
 
 gPass := 0
 gFail := 0
@@ -667,6 +668,75 @@ Eq("sizes are recorded in KB", KbFromBytes(2048), 2)
 Eq("a partial KB rounds up", KbFromBytes(1025), 2)
 Eq("nothing is zero", KbFromBytes(0), 0)
 Eq("the max model fits a DWORD of KB", KbFromBytes(3095033483), 3022494)
+
+Group("Indicator - shape")
+Eq("the pill is 56 px tall", IndicatorHeight(), 56)
+Yes("every state has its own width", IndicatorWidth("listen") != IndicatorWidth("work"))
+Eq("an unknown state still gets a width", IndicatorWidth("bogus"), 200)
+Eq("listening never resizes to its text", IndicatorFitWidth("listen", 900), IndicatorWidth("listen"))
+Eq("warm-up never resizes to its text", IndicatorFitWidth("warm", 900), IndicatorWidth("warm"))
+Eq("a short message keeps the state's width", IndicatorFitWidth("error", 40), IndicatorWidth("error"))
+Eq("a long message widens the pill around it", IndicatorFitWidth("error", 300), 300 + 56 + 24)
+Eq("but never past 560 px", IndicatorFitWidth("error", 2000), 560)
+
+Group("Indicator - motion")
+pos := 230, vel := 0, peak := 0
+loop 120 {
+    r := SpringStep(pos, vel, 340), pos := r[1], vel := r[2], peak := Max(peak, pos)
+}
+Eq("the spring settles exactly on its target", pos, 340)
+Eq("and stops moving", vel, 0)
+Yes("it overshoots on the way, which is the liquid feel", peak > 340)
+Yes("but by less than a fifth of the change", peak < 340 + 0.2 * (340 - 230))
+r := SpringStep(340, 0, 340)
+Yes("a settled spring stays settled", r[1] = 340 && r[2] = 0)
+a := 0
+loop 20
+    a := FadeStep(a, true)
+Eq("fading in reaches fully opaque", a, 1)
+loop 40
+    a := FadeStep(a, false)
+Eq("fading out reaches fully transparent", a, 0)
+
+Group("Indicator - voice level")
+buf := Buffer(8, 0)
+Eq("silence has no energy", S16Rms(buf, 8), 0)
+NumPut("Short", 32767, "Short", -32768, "Short", 32767, "Short", -32768, buf)
+Yes("a full-scale square wave is at full energy", Abs(S16Rms(buf, 8) - 1) < 0.001)
+NumPut("Short", 16384, "Short", -16384, buf)
+Yes("a half-scale square wave is at half energy", Abs(S16Rms(buf, 4) - 0.5) < 0.001)
+Eq("an odd trailing byte is not half a sample", S16Rms(buf, 5), S16Rms(buf, 4))
+Eq("no bytes, no energy", S16Rms(buf, 0), 0)
+Eq("a quiet room shows nothing", LevelFromRms(0.003), 0)
+Eq("speech close to the microphone fills the meter", LevelFromRms(0.5), 1)
+Yes("-30 dBFS sits in the middle", Abs(LevelFromRms(10 ** (-30 / 20)) - 0.5) < 0.001)
+Eq("zero is zero, not a log error", LevelFromRms(0), 0)
+bars := BarHeights([1, 0.5], 4, 4, 28)
+Eq("missing history draws flat bars", bars[1], 4)
+Eq("the newest level is on the right", bars[4], 16)
+Eq("the level before it is next to it", bars[3], 28)
+Eq("as many bars as asked for, even with no history", BarHeights([], 26, 4, 28).Length, 26)
+
+Group("Indicator - text")
+Yes("the warm-up bar moves at once", WarmProgress(1000) > 0.1)
+Eq("the warm-up bar never claims to be done", WarmProgress(600000), 0.95)
+Eq("a negative clock is the start", WarmProgress(-5), 0)
+Eq("the model is named the way people say it", ModelShortName("ggml-large-v3.bin"), "large-v3")
+Eq("a quantised model keeps its suffix", ModelShortName("ggml-large-v3-turbo-q5_0.bin"), "large-v3-turbo-q5_0")
+Eq("words are counted on whitespace", WordCount("  Review the new`tsettings`r`nwindow "), 5)
+Eq("no text, no words", WordCount(""), 0)
+Eq("the done line counts words and time", DoneSubline(11, 412), "11 words in 0.4 s")
+Eq("one word is singular", DoneSubline(1, 1000), "1 word in 1.0 s")
+Eq("a short detail fits under the message", ErrorSubline("  Rode NT-USB was unplugged`r`n"), "Rode NT-USB was unplugged")
+Eq("a log tail stays out of the pill", ErrorSubline("line one`nline two"), "")
+Eq("so does a detail too long to read at a glance", ErrorSubline(Format("{:065}", 0)), "")
+
+Group("Indicator - placement")
+at := IndicatorAnchor(0, 2560, 1392, 900, 162, 1.5)
+Eq("centred on the work area", at[1], 830)
+Eq("40 logical px above the taskbar", at[2], 1392 - 60 - 162)
+at := IndicatorAnchor(-1920, 0, 1040, 600, 108, 1)
+Eq("a monitor left of the primary has negative coordinates", at[1], -1260)
 
 ; =====================================================================
 Report()

@@ -254,7 +254,7 @@ installed system-wide and no administrator rights are required.
 
 Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 342 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 385 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.

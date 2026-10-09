@@ -11,6 +11,7 @@
 #Include %A_LineFile%\..\lib\Net.ahk
 #Include %A_LineFile%\..\lib\Install.ahk
 #Include %A_LineFile%\..\lib\Indicator.ahk
+#Include %A_LineFile%\..\lib\Tray.ahk
 
 ; =====================================================================
 ; Whispers - push-to-talk dictation powered by whisper.cpp
@@ -100,6 +101,8 @@ gCtl         := Map()
 gHistView    := ""
 gLogView     := ""
 gReleaseTick := 0       ; A_TickCount when the dictation key went up
+gTrayState   := "idle"  ; last SetState, for the menu's status line
+gMenuFlush   := 0       ; uxtheme FlushMenuThemes, once the menu follows dark mode
 ; Indicator (see its section). Sizes are logical px; IndSurface scales.
 IND_CANVAS_W := 600     ; widest pill (560) plus room for its glow
 IND_MARGIN   := 26      ; above and below the pill, for glow and shadow
@@ -160,8 +163,17 @@ LoadConfig()
 gFirstRun := (!Cfg["Configured"] && Cfg["Mic"] = "")
 
 ResolvePaths()
+; Notifications are attributed to the process's AppUserModelID; the
+; installer's Start menu shortcut carries the same one, which is what
+; makes Windows title them "Whispers" with our icon, not "AutoHotkey".
+DllCall("shell32\SetCurrentProcessExplicitAppUserModelID", "WStr", AppUserModelId())
 CreateIndicator()
 LoadHistory()
+InitMenuTheme()
+; The menu is rebuilt as it opens, so its status line and the model entry
+; are never older than the click; and it follows a light/dark switch.
+OnMessage(0x404, OnTrayNotify)
+OnMessage(0x1A, OnSettingChange)
 BuildTray()
 SetTimer(CheckIdle, 30000)
 
@@ -186,7 +198,7 @@ if (VerRead() = "") {
 ; was about to fix itself.
 if (Cfg["Mic"] = "") {
     LogMsg("INFO", "No microphone configured - running auto-detection")
-    Toast("Detecting your microphone...", 3000)
+    Notify("Detecting your microphone...", "This takes a few seconds, once.")
     picked := AutoDetectMic()
     if (picked != "") {
         Cfg["Mic"] := picked
@@ -207,7 +219,7 @@ if (Cfg["VramPolicy"] = "resident")
 SetState("idle")
 if (Cfg["PlaySounds"])
     SoundBeep(800, 100)
-Toast(APP_NAME " ready - hold " Cfg["Hotkey"], 2500)
+Notify(APP_NAME " is ready", "Hold " Cfg["Hotkey"] " to dictate in any app.")
 
 if (gFirstRun) {
     LogMsg("INFO", "First run - showing the setup window")
@@ -934,7 +946,7 @@ DeliverText(text) {
     ; The pill already says it; the toast is for those who turned it off.
     if !Cfg["ShowIndicator"] {
         preview := PreviewText(text)
-        Toast(Cfg["AutoPaste"] ? "Pasted: " preview : "Copied: " preview, 2200)
+        QuietTip(Cfg["AutoPaste"] ? "Pasted: " preview : "Copied: " preview, 2200)
     }
     SetState(gPausedState())
 }
@@ -993,7 +1005,7 @@ FetchVerified(url, destPath, expectedSha, label, approxBytes := 0) {
             DlClose(ui)
             gBusy := false
             LogMsg("INFO", "Download cancelled by the user: " label)
-            Toast("Download cancelled", 2000)
+            Notify("Download cancelled")
             return false
         }
         DlProgress(ui, FileExist(part) ? FileGetSize(part) : 0, approxBytes)
@@ -1200,7 +1212,7 @@ CheckForUpdate(*) {
                    "sha256", asset["sha256"], "name", asset["name"])
     LogMsg("INFO", "Update available: " tag " (" asset["name"] ")")
     BuildTray()
-    Toast("Whispers " NormalizeVersion(tag) " is available - see the tray menu", 6000)
+    Notify("Whispers " NormalizeVersion(tag) " is ready to install", "Right-click the tray icon and choose Update.")
 }
 
 InstallUpdate(*) {
@@ -1234,18 +1246,32 @@ Fail(msg, detail) {
     IndError(msg, detail)
     if (Cfg["PlaySounds"])
         SoundBeep(300, 250)
-    Toast(msg (detail != "" ? "`n" detail : ""), 5000)
+    ; The pill shows it where the user is looking; the full detail is in
+    ; the log. Without the pill, a notification is the only trace.
+    if !Cfg["ShowIndicator"]
+        Notify(msg, detail)
     SetState(gPausedState())
 }
 
 Warn(msg) {
+    global Cfg
     LogMsg("WARN", msg)
     IndWarn(msg)
-    Toast(msg, 2500)
+    if !Cfg["ShowIndicator"]
+        Notify(msg)
     SetState(gPausedState())
 }
 
-Toast(msg, duration := 2000) {
+; A Windows notification, silent: Whispers never makes a sound the user
+; did not ask for with PlaySounds. Option 4 shows the tray icon in it.
+Notify(title, text := "") {
+    TrayTip(text = "" ? " " : text, title, 4 | 16)
+}
+
+; A tooltip by the cursor. Only for the one message that would otherwise
+; become a notification per dictation - "Pasted" when the indicator is
+; turned off - which would bury the notification centre.
+QuietTip(msg, duration := 2000) {
     ToolTip(msg)
     SetTimer(() => ToolTip(), -duration)
 }
@@ -1745,21 +1771,10 @@ gPausedState() {
 
 ; Tray icon + tooltip reflect the current state at a glance.
 SetState(state) {
-    global gCurHotkey, APP_NAME
-    switch state {
-        case "rec":
-            try TraySetIcon("shell32.dll", 28)
-            A_IconTip := APP_NAME " - RECORDING"
-        case "work":
-            try TraySetIcon("shell32.dll", 239)
-            A_IconTip := APP_NAME " - transcribing"
-        case "paused":
-            try TraySetIcon("shell32.dll", 110)
-            A_IconTip := APP_NAME " - PAUSED (hotkey disabled)"
-        default:
-            try TraySetIcon("shell32.dll", 294)
-            A_IconTip := APP_NAME " - ready (hold " gCurHotkey ")"
-    }
+    global gCurHotkey, APP_NAME, ROOT_DIR, gTrayState
+    gTrayState := state
+    try TraySetIcon(ROOT_DIR "\assets\tray\" TrayIconName(state) ".ico")
+    A_IconTip := APP_NAME " - " TrayHeader(state, gCurHotkey)
 }
 
 TogglePause(*) {
@@ -1771,12 +1786,12 @@ TogglePause(*) {
         if gRecording
             StopRec()
         LogMsg("INFO", "Paused")
-        Toast("Dictation paused - " gCurHotkey " released", 2000)
+        Notify("Dictation paused", gCurHotkey " does nothing until you resume.")
     } else {
         try Hotkey(gCurHotkey, "On")
         try Hotkey(gCurHotkey " Up", "On")
         LogMsg("INFO", "Resumed")
-        Toast("Dictation active - hold " gCurHotkey, 2000)
+        Notify("Dictation resumed", "Hold " gCurHotkey " to dictate.")
     }
     BuildTray()
     SetState(gPausedState())
@@ -1786,42 +1801,138 @@ TogglePause(*) {
 ; Tray menu
 ; =====================================================================
 BuildTray() {
-    global gPaused, gUpdate
+    global gPaused, gUpdate, gTrayState, gCurHotkey, Cfg
     m := A_TrayMenu
     m.Delete()
+    header := TrayHeader(gTrayState, gCurHotkey)
+    m.Add(header, (*) => 0)
+    m.Disable(header)
+    m.Add()
     ; An available update goes first and is the default action: it is the
     ; only entry that is not there all the time, so burying it would make
     ; the check pointless.
     if IsObject(gUpdate) {
-        m.Add("Install Whispers " gUpdate["tag"] "...", InstallUpdate)
-        m.Add()
+        update := UpdateMenuLabel(gUpdate["tag"])
+        MenuItem(m, update, InstallUpdate, 0xE896)          ; Download
     }
-    m.Add("Settings...", (*) => ShowSettings())
-    m.Add(gPaused ? "Resume dictation" : "Pause dictation", TogglePause)
+    MenuItem(m, gPaused ? "Resume dictation" : "Pause dictation", TogglePause, gPaused ? 0xE768 : 0xE769)
+    ; A process check, not ServerAlive: the menu must open at once, and an
+    ; HTTP probe costs up to two seconds while a model is loading.
+    loaded := ProcessExist("whisper-server.exe") != 0
+    MenuItem(m, ModelMenuLabel(loaded, TierVram(Cfg["Tier"])), ToggleServer, 0xE9F5)   ; Processing
     m.Add()
-    m.Add("History...", (*) => ShowSettings(3))
-    m.Add("Log...", (*) => ShowSettings(4))
+    MenuItem(m, "History...", (*) => ShowSettings(3), 0xE81C)
+    MenuItem(m, "Settings...", (*) => ShowSettings(), 0xE713)
+    MenuItem(m, "Diagnostics...", (*) => ShowSettings(4), 0xE9D9)
+    MenuItem(m, "Run setup again...", (*) => ShowFirstRun(), 0xE720)   ; Microphone
     m.Add()
-    m.Add(ServerAlive() ? "Unload model (free VRAM)" : "Preload model", ToggleServer)
-    m.Add("Run setup again...", (*) => ShowFirstRun())
-    m.Add("Reload script", (*) => Reload())
-    m.Add()
-    m.Add("Exit", (*) => ExitApp())
-    m.Default := IsObject(gUpdate) ? "Install Whispers " gUpdate["tag"] "..." : "Settings..."
+    MenuItem(m, "Restart Whispers", (*) => Reload(), 0xE72C)          ; Refresh
+    MenuItem(m, "Quit Whispers", (*) => ExitApp(), 0xE7E8)            ; Power
+    m.Default := IsObject(gUpdate) ? update : "Settings..."
+}
+
+MenuItem(m, label, callback, glyph) {
+    m.Add(label, callback)
+    icon := MenuGlyph(glyph)
+    if icon
+        try m.SetIcon(label, "HICON:*" icon)
+}
+
+; One glyph of the Windows icon font as a small icon, in the menu's text
+; colour. Segoe Fluent Icons ships with Windows 11 and Segoe MDL2 Assets
+; with Windows 10; they share these code points. Kept for the session:
+; there are a dozen of them, and the "*" above tells AutoHotkey they are
+; not its to destroy.
+MenuGlyph(cp) {
+    static cache := Map(), family := ""
+    global gIndFmt
+    if !gIndFmt         ; GDI+ did not start (see CreateIndicator)
+        return 0
+    dark := IsDarkTheme()
+    key := cp "|" dark
+    if cache.Has(key)
+        return cache[key]
+    if (family = "") {
+        family := "Segoe MDL2 Assets"
+        if !DllCall("gdiplus\GdipCreateFontFamilyFromName", "WStr", "Segoe Fluent Icons", "Ptr", 0, "Ptr*", &probe := 0) {
+            family := "Segoe Fluent Icons"
+            DllCall("gdiplus\GdipDeleteFontFamily", "Ptr", probe)
+        }
+    }
+    s := DllCall("GetSystemMetrics", "Int", 49)          ; SM_CXSMICON
+    DllCall("gdiplus\GdipCreateBitmapFromScan0", "Int", s, "Int", s, "Int", 0, "Int", 0x26200A, "Ptr", 0, "Ptr*", &bmp := 0)
+    DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", bmp, "Ptr*", &g := 0)
+    DllCall("gdiplus\GdipSetTextRenderingHint", "Ptr", g, "Int", 4)
+    DllCall("gdiplus\GdipCreateFontFamilyFromName", "WStr", family, "Ptr", 0, "Ptr*", &fam := 0)
+    DllCall("gdiplus\GdipCreateFont", "Ptr", fam, "Float", s * 0.875, "Int", 0, "Int", 2, "Ptr*", &font := 0)
+    DllCall("gdiplus\GdipStringFormatGetGenericTypographic", "Ptr*", &typo := 0)
+    DllCall("gdiplus\GdipCloneStringFormat", "Ptr", typo, "Ptr*", &fmt := 0)
+    DllCall("gdiplus\GdipSetStringFormatAlign", "Ptr", fmt, "Int", 1)
+    DllCall("gdiplus\GdipSetStringFormatLineAlign", "Ptr", fmt, "Int", 1)
+    DllCall("gdiplus\GdipCreateSolidFill", "UInt", dark ? 0xFFFFFFFF : 0xFF1A1A1A, "Ptr*", &br := 0)
+    DllCall("gdiplus\GdipDrawString", "Ptr", g, "WStr", Chr(cp), "Int", -1, "Ptr", font, "Ptr", GpRectF(0, 0, s, s), "Ptr", fmt, "Ptr", br)
+    DllCall("gdiplus\GdipCreateHICONFromBitmap", "Ptr", bmp, "Ptr*", &hicon := 0)
+    DllCall("gdiplus\GdipDeleteBrush", "Ptr", br)
+    DllCall("gdiplus\GdipDeleteStringFormat", "Ptr", fmt)
+    DllCall("gdiplus\GdipDeleteFont", "Ptr", font)
+    DllCall("gdiplus\GdipDeleteFontFamily", "Ptr", fam)
+    DllCall("gdiplus\GdipDeleteGraphics", "Ptr", g)
+    DllCall("gdiplus\GdipDisposeImage", "Ptr", bmp)
+    cache[key] := hicon
+    return hicon
+}
+
+IsDarkTheme() {
+    try return RegRead("HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme") = 0
+    return false
+}
+
+; Lets the tray menu follow Windows' dark mode. uxtheme exports this only
+; by ordinal and documents none of it, but it has been stable since
+; Windows 10 1903 and is what Explorer's own menus use: 135 is
+; SetPreferredAppMode (1 = follow the system), 136 FlushMenuThemes.
+; Builds before 1903 exported other functions at those ordinals, so they
+; are left with the light menu rather than called blind.
+InitMenuTheme() {
+    global gMenuFlush
+    if (VerCompare(A_OSVersion, "10.0.18362") < 0)
+        return
+    try {
+        ux := DllCall("LoadLibrary", "Str", "uxtheme", "Ptr")
+        setMode := DllCall("GetProcAddress", "Ptr", ux, "Ptr", 135, "Ptr")
+        flush := DllCall("GetProcAddress", "Ptr", ux, "Ptr", 136, "Ptr")
+        if (setMode && flush) {
+            DllCall(setMode, "Int", 1)
+            DllCall(flush)
+            gMenuFlush := flush
+        }
+    }
+}
+
+OnTrayNotify(wParam, lParam, msg, hwnd) {
+    ; WM_RBUTTONDOWN, or WM_CONTEXTMENU from the keyboard: AutoHotkey
+    ; shows the menu after this returns, so it shows the rebuilt one.
+    if ((lParam & 0xFFFF) = 0x204 || (lParam & 0xFFFF) = 0x7B)
+        BuildTray()
+}
+
+OnSettingChange(wParam, lParam, msg, hwnd) {
+    global gMenuFlush
+    if (gMenuFlush && lParam && StrGet(lParam) = "ImmersiveColorSet")
+        DllCall(gMenuFlush)
 }
 
 ToggleServer(*) {
     if ServerAlive() {
         StopServer("user request")
-        Toast("Model unloaded - VRAM released", 2500)
+        Notify("Model unloaded", "The next dictation loads it again.")
     } else {
-        Toast("Loading model...", 2000)
         ok := EnsureServerReady()
         ; EnsureServerReady shows the warm-up pill; nothing else will
         ; replace it when the load was asked for from the tray.
         IndHide()
         if ok
-            Toast("Model loaded and resident", 2500)
+            Notify("Model loaded", "The next dictation will not wait for it.")
     }
     BuildTray()
 }
@@ -1940,7 +2051,7 @@ ShowSettings(startTab := 1) {
     tab.UseTab(3)
     gHistView := g.Add("ListView", "xm+10 y+14 w630 h340", ["Time", "Text"])
     gHistView.OnEvent("DoubleClick", HistCopy)
-    g.Add("Text", "xm+10 y+6 w630", "Double-click a line to copy it back to the clipboard.")
+    gCtl["HistHint"] := g.Add("Text", "xm+10 y+6 w630", "Double-click a line to copy it back to the clipboard.")
 
     ; ---------- Log ----------
     tab.UseTab(4)
@@ -1949,7 +2060,8 @@ ShowSettings(startTab := 1) {
 
     ; ---------- Buttons ----------
     tab.UseTab()
-    g.Add("Button", "xm+430 y+14 w100 Default", "Save").OnEvent("Click", SaveSettings)
+    gCtl["Save"] := g.Add("Button", "xm+430 y+14 w100 Default", "Save")
+    gCtl["Save"].OnEvent("Click", SaveSettings)
     g.Add("Button", "x+10 yp w100", "Close").OnEvent("Click", (*) => g.Hide())
 
     g.OnEvent("Close", (*) => g.Hide())
@@ -2036,7 +2148,15 @@ HistCopy(lv, row) {
         return
     A_Clipboard := gHistory[row]["text"]
     ClipWait(1)
-    Toast("Copied to clipboard", 1500)
+    ; Said under the list rather than in a notification: the user is
+    ; looking at the window, and this is not news worth keeping.
+    try gCtl["HistHint"].Value := "Copied to the clipboard."
+    SetTimer(HistHintReset, -2000)
+}
+
+HistHintReset() {
+    global gCtl
+    try gCtl["HistHint"].Value := "Double-click a line to copy it back to the clipboard."
 }
 
 TestMic(btn, *) {
@@ -2141,7 +2261,14 @@ SaveSettings(btn, *) {
     BuildTray()
     SetState(gPausedState())
     RefreshStatus()
-    Toast("Settings saved", 1800)
+    ; Confirmed on the button itself: the window stays open.
+    try gCtl["Save"].Text := "Saved"
+    SetTimer(SaveLabelReset, -1500)
+}
+
+SaveLabelReset() {
+    global gCtl
+    try gCtl["Save"].Text := "Save"
 }
 
 ; =====================================================================
@@ -2302,7 +2429,7 @@ WizFinish(btn, *) {
     try gWizard.Hide()
     BuildTray()
     SetState(gPausedState())
-    Toast("Setup done - hold " gCurHotkey " to dictate", 3000)
+    Notify("Setup done", "Hold " gCurHotkey " to dictate in any app.")
 }
 
 GetModelClick(btn, *) {
@@ -2338,7 +2465,7 @@ SetAutostart(enable) {
     if (enable) {
         if !FileExist(lnk) {
             try {
-                FileCreateShortcut(A_AhkPath, lnk, A_ScriptDir, '"' A_ScriptFullPath '"')
+                FileCreateShortcut(A_AhkPath, lnk, A_ScriptDir, '"' A_ScriptFullPath '"',, A_ScriptDir "\assets\Whispers.ico")
                 LogMsg("INFO", "Autostart enabled -> " A_AhkPath)
             } catch as e {
                 LogMsg("ERROR", "Autostart shortcut failed: " e.Message)

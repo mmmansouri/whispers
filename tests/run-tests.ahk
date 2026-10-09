@@ -25,6 +25,7 @@
 #Include %A_LineFile%\..\..\lib\Net.ahk
 #Include %A_LineFile%\..\..\lib\Install.ahk
 #Include %A_LineFile%\..\..\lib\Indicator.ahk
+#Include %A_LineFile%\..\..\lib\Tray.ahk
 
 gPass := 0
 gFail := 0
@@ -730,6 +731,20 @@ Eq("one word is singular", DoneSubline(1, 1000), "1 word in 1.0 s")
 Eq("a short detail fits under the message", ErrorSubline("  Rode NT-USB was unplugged`r`n"), "Rode NT-USB was unplugged")
 Eq("a log tail stays out of the pill", ErrorSubline("line one`nline two"), "")
 Eq("so does a detail too long to read at a glance", ErrorSubline(Format("{:065}", 0)), "")
+
+Group("Tray")
+Eq("a recording shows the recording icon", TrayIconName("rec"), "recording")
+Eq("a transcription shows the working icon", TrayIconName("work"), "working")
+Eq("paused has its own icon", TrayIconName("paused"), "paused")
+Eq("anything else is ready", TrayIconName("idle"), "ready")
+Eq("the menu says what the key does when ready", TrayHeader("idle", "F9"), "Ready - hold F9 to dictate")
+Eq("and while recording", TrayHeader("rec", "F9"), "Listening - release F9 to transcribe")
+Eq("and when paused", TrayHeader("paused", "^F9"), "Paused - ^F9 does nothing")
+Eq("an unloaded model is offered for loading", ModelMenuLabel(false, 4700), "Load the model now")
+Eq("a loaded GPU model says what it holds", ModelMenuLabel(true, 4700), "Free the GPU now`t4.7 GB")
+Eq("the CPU tier holds no GPU memory", ModelMenuLabel(true, 0), "Unload the model now")
+Eq("the update entry names the version without its v", UpdateMenuLabel("v2.2.0"), "Update to 2.2.0")
+Eq("the notification identity is the one the shortcuts carry", AppUserModelId(), "mmmansouri.Whispers")
 
 Group("Indicator - placement")
 at := IndicatorAnchor(0, 2560, 1392, 900, 162, 1.5)

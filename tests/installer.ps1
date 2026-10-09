@@ -191,6 +191,23 @@ AssertTrue 'the AppId is readable in both the installer and lib\Install.ahk' ($i
     "installer: '$issAppId', application: '$ahkAppId'"
 AssertEq 'the application and the installer name the same AppId' $issAppId $ahkAppId
 
+# Notifications are titled after the shortcut carrying the AppUserModelID
+# the process declares. Every shortcut carries it, and it is the one the
+# application declares, or they say "AutoHotkey" with its icon.
+$issAumids = @([regex]::Matches($iss, 'AppUserModelID:\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
+$ahkAumid  = if ((Get-Content (Join-Path $root 'lib\Install.ahk') -Raw) -match 'AppUserModelId\(\)\s*\{\s*return "([^"]+)"') { $Matches[1] } else { $null }
+$issIcons = if ($iss -match '(?s)\[Icons\](.*?)?
+\[') { $Matches[1] } else { '' }
+AssertEq 'every shortcut carries an AppUserModelID' ([regex]::Matches($issIcons, '(?m)^Name:').Count) $issAumids.Count
+AssertTrue 'the shortcuts and the application declare the same AppUserModelID' `
+    ($ahkAumid -and @($issAumids | Where-Object { $_ -ne $ahkAumid }).Count -eq 0) "installer: $($issAumids -join ','), application: '$ahkAumid'"
+
+# Whispers draws its own icons now; a stock shell32 icon left anywhere is
+# a shortcut or a tray state that was missed.
+AssertTrue 'no shortcut uses a stock shell32 icon' ($iss -notmatch 'shell32') 'shell32 is still referenced in the .iss'
+AssertTrue 'no tray state uses a stock shell32 icon' `
+    ((Get-Content (Join-Path $root 'Whispers.ahk') -Raw) -notmatch 'TraySetIcon\("shell32') 'TraySetIcon still points at shell32.dll'
+
 # Anything the .iss says it ships has to exist, or the build fails at a
 # much less obvious moment.
 $sources = [regex]::Matches($iss, 'Source:\s*"\.\.\\([^"]+)"') | ForEach-Object { $_.Groups[1].Value }

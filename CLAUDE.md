@@ -48,6 +48,7 @@ There is no single-test selector. `tests\run-tests.ahk` is one flat script of `G
 - `lib\Net.ahk` — hash parsing/matching, version comparison, release metadata.
 - `lib\Devices.ahk` — dshow device list parsing, microphone matching, level parsing.
 - `lib\Install.ahk` — the uninstall entry Windows lists (AppId, key, `EstimatedSize` in KB) and whether a directory is the registered installation.
+- `lib\Tray.ahk` — the tray's wording and icon per state; the menu is rebuilt from it each time it opens.
 - `lib\Indicator.ahk` — the indicator's arithmetic: width per state, the spring and fade steps, voice level from s16le samples, and its text. The GDI+ drawing is in `Whispers.ahk` (ADR-0002).
 
 ### Dictation pipeline
@@ -73,12 +74,13 @@ Raising a pin is manual and deliberate: edit `versions.json`, run the validation
 - The app version lives in `APP_VERSION` (`Whispers.ahk`) **and** `"whispers"` (`versions.json`). Bump both.
 - The VRAM thresholds live in `lib\Tiers.ahk` **and** in `installer\Whispers.iss` `[Code]`, because the installer runs before the app exists on disk. Change both.
 - The AppId lives in `[Setup]` of `installer\Whispers.iss` **and** in `AppId()` of `lib\Install.ahk`: the app rewrites `EstimatedSize` in the uninstall entry named after it. Never change it - upgrades are matched on it.
+- The AppUserModelID lives on every shortcut in `[Icons]` of `installer\Whispers.iss` **and** in `AppUserModelId()` of `lib\Install.ahk`: Windows titles the app's notifications after the shortcut carrying the ID the process declares.
 
 ## Conventions
 
 - `.ahk`, `.iss` and `.ps1` files are **pure ASCII with CRLF** line endings — asserted by the static installer suite, enforced on checkout by `.gitattributes`. No em dashes, arrows, accented characters or smart quotes in code or comments; write `-` and `->`.
 - Comments explain *why*, usually naming the concrete bug or measurement behind a decision. Match that density and tone when editing.
-- A bug that reached the running product gets a test marked `REGRESSION` and a row in the README table "What the REGRESSION assertions are for". README also states assertion counts per suite (unit 385, integration 53, installer 91) — update them when adding tests.
+- A bug that reached the running product gets a test marked `REGRESSION` and a row in the README table "What the REGRESSION assertions are for". README also states assertion counts per suite (unit 397, integration 53, installer 95) — update them when adding tests.
 - Every failure path reports the real cause via `Fail(msg, detail)` with the tail of the relevant log (`%APPDATA%\Whispers\logs\`), never a bare "failed".
 - Per-user only: no administrator rights anywhere (installer is `PrivilegesRequired=lowest`, server port clamped to ≥1024, loopback only).
 - User data lives outside the install root: `%APPDATA%\Whispers\` (INI, logs, `history.tsv`), scratch in `%TEMP%\Whispers\`. Both the integration and installer suites back up and restore the real INI.

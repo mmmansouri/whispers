@@ -20,6 +20,14 @@ AppId() {
 ; Per-user only: HKCU is the one hive Whispers can write without
 ; administrator rights. An install made for all users lives under HKLM
 ; and is simply not found here, which is the right outcome.
+; Must equal AppUserModelID on the shortcuts in installer\Whispers.iss.
+; Windows names a notification after the Start menu shortcut that carries
+; the sender's AppUserModelID; without the match it says "AutoHotkey".
+; tests\installer.ps1 asserts that the two copies agree.
+AppUserModelId() {
+    return "mmmansouri.Whispers"
+}
+
 UninstallKey() {
     return "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\" AppId() "_is1"
 }

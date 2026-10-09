@@ -39,7 +39,7 @@ DefaultDirName={localappdata}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 UninstallDisplayName={#AppName} {#AppVersion}
-UninstallDisplayIcon={app}\AutoHotkey64.exe
+UninstallDisplayIcon={app}\assets\Whispers.ico
 
 ; No administrator rights, ever.
 PrivilegesRequired=lowest
@@ -85,6 +85,9 @@ Source: "..\lib\*.ahk";      DestDir: "{app}\lib"; Flags: ignoreversion
 Source: "..\versions.json";  DestDir: "{app}";     Flags: ignoreversion
 Source: "..\LICENSE";        DestDir: "{app}";     Flags: ignoreversion
 Source: "..\README.md";      DestDir: "{app}";     Flags: ignoreversion
+; Drawn by tools\build-icons.ps1: the shortcuts' icon and the tray states.
+Source: "..\assets\Whispers.ico"; DestDir: "{app}\assets";      Flags: ignoreversion
+Source: "..\assets\tray\*.ico";   DestDir: "{app}\assets\tray"; Flags: ignoreversion
 
 [INI]
 ; Seed the tier the user picked in the wizard. Every other setting keeps
@@ -93,9 +96,12 @@ Filename: "{userappdata}\{#AppName}\{#AppName}.ini"; Section: "Engine"; Key: "Ti
   String: "{code:ChosenTierValue}"
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 28
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 28; Tasks: desktopicon
-Name: "{userstartup}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; IconFilename: "{sys}\shell32.dll"; IconIndex: 28; Tasks: startup
+; AppUserModelID must equal AppUserModelId() in lib\Install.ahk: Windows
+; titles the app's notifications after the shortcut carrying the ID the
+; process declares. tests\installer.ps1 asserts that the copies agree.
+Name: "{group}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\Whispers.ico"; AppUserModelID: "mmmansouri.Whispers"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\Whispers.ico"; AppUserModelID: "mmmansouri.Whispers"; Tasks: desktopicon
+Name: "{userstartup}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\Whispers.ico"; AppUserModelID: "mmmansouri.Whispers"; Tasks: startup
 
 [Run]
 Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; \

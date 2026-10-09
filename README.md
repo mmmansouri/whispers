@@ -25,6 +25,12 @@ version the driver reports, ffmpeg, the AutoHotkey interpreter, and the
 one model for the selected tier. Each download is rejected unless its
 SHA-256 matches `versions.json`.
 
+An upgrade downloads only what the new release changed. The installed
+model is hashed and kept when it still matches its pin; the engine,
+ffmpeg and the interpreter are kept when they were unpacked from the
+archive that is still pinned, which `downloads.ini` in the install root
+records.
+
 Uninstalling stops a running Whispers first, then removes the install
 root, including everything that was downloaded into it. Your settings, logs and history live in
 `%APPDATA%\Whispers`, and you are asked before those are touched.
@@ -80,7 +86,8 @@ Whispers asks GitHub once at startup, eight seconds in so it cannot slow
 anything down, whether a newer release exists. If one does, the tray menu
 grows an entry that downloads it, checks it and runs it. Nothing is ever
 installed without that click, and the check can be turned off from the
-settings window.
+settings window. The installer it runs keeps the engine, ffmpeg and the
+model you already have unless the release pins different ones.
 
 The request is a plain GET to the releases API. No identifier, no
 configuration and nothing about the machine is sent with it.
@@ -263,7 +270,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 78 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 87 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI
@@ -286,12 +293,16 @@ The full run builds the installer, installs it silently into a temporary
 directory, and checks what actually landed — the file set, the model's
 SHA-256, the absence of the 25 executables the upstream archives carry
 and Whispers never runs, and whether each installed binary can resolve
-its own DLLs. Then it uninstalls and checks the machine is clean.
+its own DLLs. It then runs the same installer again over that
+installation, which must download nothing, and finally uninstalls and
+checks the machine is clean.
 
 It seeds the same INI a real install does, so it backs up your settings
 first and restores them even when it fails, and it refuses to start
 while Whispers is running — a running instance would save its
-configuration on top of that restore.
+configuration on top of that restore. It also refuses while a real
+installation is present: its uninstall would remove that one's Start
+Menu shortcut.
 
 ### What the REGRESSION assertions are for
 
@@ -309,6 +320,7 @@ hand. They exist so it cannot happen twice.
 | `tabs are stripped before a TSV write` | A transcription containing a tab corrupted the history file. |
 | `a cleared field is whitespace, not a path` | `ModelsDir= ` was treated as a directory named " ". |
 | `the size Windows lists includes the downloads` | Installed apps listed Whispers at 4.33 MB - the script and the uninstaller - while the engine, ffmpeg and the model made it 3.9 GB. |
+| `an upgrade downloads nothing that is already installed` | Every upgrade downloaded the engine, ffmpeg, the interpreter and the model again - 3.9 GB on the max tier with the CUDA engine, for a release that changed one script. |
 | `the uninstall stops the Whispers that was running` | Uninstalling from Windows left the running instance alive: the hotkey kept answering with ffmpeg deleted, every dictation failed, and the files it held stayed on disk. |
 | `a tap is too short to have captured anything` | A press too short for ffmpeg to open the device left no file, and was reported as "Mic capture failed" — sending the user to look for a hardware fault that was not there. |
 

@@ -102,10 +102,12 @@ Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; Workin
   Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; Downloaded at install time, so the uninstaller has no record of them.
+; Downloaded or written at install time, so the uninstaller has no
+; record of them.
 Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\models"
 Type: files;          Name: "{app}\AutoHotkey64.exe"
+Type: files;          Name: "{app}\downloads.ini"
 
 [Code]
 
@@ -128,6 +130,10 @@ var
   EngineAsset:  String;
   EngineSha:    String;
   EngineLabel:  String;
+
+  // What is already installed and is not downloaded again; decided when
+  // the Ready page is left, honoured by InstallDownloads.
+  KeepAhk, KeepFfmpeg, KeepEngine, KeepModel: Boolean;
 
 // ---------------------------------------------------------------------
 // Small helpers
@@ -329,6 +335,76 @@ begin
 end;
 
 // ---------------------------------------------------------------------
+// What an upgrade does not download again
+//
+// Every upgrade used to download everything again: 3.9 GB on the max
+// tier with the CUDA engine, for a release that changed one script.
+//
+// The model is pinned by the hash of the file itself, so the installed
+// copy is hashed and kept when it matches. The other three are pinned by
+// the hash of their .zip, which is gone once unpacked, so downloads.ini
+// records which archive each one was unpacked from. An entry is removed
+// before unpacking and written back only once everything is copied: an
+// install that died half way never reads as complete.
+// ---------------------------------------------------------------------
+
+function ManifestPath: String;
+begin
+  Result := ExpandConstant('{app}\downloads.ini');
+end;
+
+function ArchiveInstalled(const Key, Sha, Probe: String): Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\') + Probe) and
+            (CompareText(GetIniString('Downloads', Key, '', ManifestPath), Sha) = 0);
+end;
+
+procedure ForgetArchive(const Key: String);
+begin
+  DeleteIniEntry('Downloads', Key, ManifestPath);
+end;
+
+procedure RecordArchive(const Key, Sha: String);
+begin
+  if not SetIniString('Downloads', Key, Sha, ManifestPath) then
+    Log('Could not record ' + Key + ' in ' + ManifestPath +
+        ' - the next upgrade downloads it again');
+end;
+
+function ModelPathFor(const Tier: Integer): String;
+begin
+  Result := ExpandConstant('{app}\models\') + TierFile[Tier];
+end;
+
+// About 10 seconds for the 3 GB model, against minutes of download.
+function ModelInstalled(const Tier: Integer): Boolean;
+var
+  Path, Got: String;
+begin
+  Result := False;
+  Path := ModelPathFor(Tier);
+  if not FileExists(Path) then
+    Exit;
+  try
+    Got := GetSHA256OfFile(Path);
+  except
+    Log('Could not hash ' + Path + ': ' + GetExceptionMessage + ' - downloading it again');
+    Exit;
+  end;
+  Result := CompareText(Got, TierSha[Tier]) = 0;
+  if not Result then
+    Log('The installed ' + TierFile[Tier] + ' hashes to ' + Got +
+        ', not the pinned ' + TierSha[Tier] + ' - downloading it again');
+end;
+
+// tests\installer.ps1 reads these lines to prove an upgrade kept them.
+procedure LogKept(const What: String; const Kept: Boolean);
+begin
+  if Kept then
+    Log(What + ' is already installed - not downloading it again');
+end;
+
+// ---------------------------------------------------------------------
 // Wizard
 // ---------------------------------------------------------------------
 
@@ -429,10 +505,22 @@ begin
   DownloadPage.ShowBaseNameInsteadOfUrl := True;
 end;
 
+// Only the cheap checks run here; hashing the model waits for Next, so
+// the Ready page never hangs before it is drawn.
+procedure MemoItem(const Item: String; const Kept: Boolean;
+                   const Space, NewLine: String; var Fetch, Keep: String);
+begin
+  if Kept then
+    Keep := Keep + Space + Item + NewLine
+  else
+    Fetch := Fetch + Space + Item + NewLine;
+end;
+
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo,
   MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: String): String;
 var
-  Detected: String;
+  Detected, Fetch, Keep: String;
+  Tier: Integer;
 begin
   if GpuPresent then
     Detected := GpuName + ' (' + IntToStr(GpuVramMb) +
@@ -440,13 +528,28 @@ begin
   else
     Detected := 'no usable NVIDIA GPU - CPU mode';
 
+  Tier := SelectedTierIndex;
+  Fetch := '';
+  Keep := '';
+  MemoItem('whisper.cpp {#EngineTag}, ' + EngineLabel + ' build',
+           ArchiveInstalled('engine', EngineSha, 'bin\whisper-server.exe'), Space, NewLine, Fetch, Keep);
+  MemoItem('ffmpeg {#FfmpegVersion}',
+           ArchiveInstalled('ffmpeg', '{#FfmpegSha}', 'bin\ffmpeg.exe'), Space, NewLine, Fetch, Keep);
+  MemoItem('AutoHotkey {#AhkVersion}',
+           ArchiveInstalled('AutoHotkey', '{#AhkSha}', 'AutoHotkey64.exe'), Space, NewLine, Fetch, Keep);
+  if FileExists(ModelPathFor(Tier)) then
+    Keep := Keep + Space + 'model ' + TierFile[Tier] +
+            ' - downloaded again if its SHA-256 no longer matches' + NewLine
+  else
+    Fetch := Fetch + Space + 'model ' + TierFile[Tier] + NewLine;
+
   Result := MemoDirInfo + NewLine + NewLine +
-            'Detected hardware:' + NewLine + Space + Detected + NewLine + NewLine +
-            'Will download:' + NewLine +
-            Space + 'whisper.cpp {#EngineTag}, ' + EngineLabel + ' build' + NewLine +
-            Space + 'ffmpeg {#FfmpegVersion}' + NewLine +
-            Space + 'AutoHotkey {#AhkVersion}' + NewLine +
-            Space + 'model ' + TierFile[SelectedTierIndex] + NewLine + NewLine +
+            'Detected hardware:' + NewLine + Space + Detected + NewLine + NewLine;
+  if Keep <> '' then
+    Result := Result + 'Already installed, kept:' + NewLine + Keep + NewLine;
+  if Fetch <> '' then
+    Result := Result + 'Will download:' + NewLine + Fetch + NewLine;
+  Result := Result +
             'Every download is rejected unless its SHA-256 matches versions.json.' + NewLine;
   if MemoTasksInfo <> '' then
     Result := Result + NewLine + MemoTasksInfo;
@@ -463,13 +566,28 @@ begin
 
   Tier := SelectedTierIndex;
   DownloadPage.Clear;
-  DownloadPage.Add('{#AhkUrl}',    'AutoHotkey.zip', '{#AhkSha}');
-  DownloadPage.Add('{#FfmpegUrl}', 'ffmpeg.zip',     '{#FfmpegSha}');
-  DownloadPage.Add('{#EngineBase}' + EngineAsset, 'engine.zip', EngineSha);
-  DownloadPage.Add('{#ModelBase}' + TierFile[Tier], TierFile[Tier], TierSha[Tier]);
-
   DownloadPage.Show;
   try
+    KeepAhk    := ArchiveInstalled('AutoHotkey', '{#AhkSha}', 'AutoHotkey64.exe');
+    KeepFfmpeg := ArchiveInstalled('ffmpeg', '{#FfmpegSha}', 'bin\ffmpeg.exe');
+    KeepEngine := ArchiveInstalled('engine', EngineSha, 'bin\whisper-server.exe');
+    DownloadPage.SetText('Checking the installed model...', TierFile[Tier]);
+    KeepModel  := ModelInstalled(Tier);
+
+    LogKept('AutoHotkey {#AhkVersion}', KeepAhk);
+    LogKept('ffmpeg {#FfmpegVersion}', KeepFfmpeg);
+    LogKept('engine ' + EngineAsset, KeepEngine);
+    LogKept('model ' + TierFile[Tier], KeepModel);
+
+    if not KeepAhk then
+      DownloadPage.Add('{#AhkUrl}',    'AutoHotkey.zip', '{#AhkSha}');
+    if not KeepFfmpeg then
+      DownloadPage.Add('{#FfmpegUrl}', 'ffmpeg.zip',     '{#FfmpegSha}');
+    if not KeepEngine then
+      DownloadPage.Add('{#EngineBase}' + EngineAsset, 'engine.zip', EngineSha);
+    if not KeepModel then
+      DownloadPage.Add('{#ModelBase}' + TierFile[Tier], TierFile[Tier], TierSha[Tier]);
+
     try
       DownloadPage.Download;
     except
@@ -556,25 +674,39 @@ var
 begin
   Tmp := ExpandConstant('{tmp}');
 
-  Staging := Tmp + '\stage-ahk';
-  Unpack(Tmp + '\AutoHotkey.zip', Staging, 'Unpacking AutoHotkey...');
-  CopyStaged(Staging, ExpandConstant('{app}'), False, 'AutoHotkey64.exe');
-  DelTree(Staging, True, True, True);
+  if not KeepAhk then begin
+    ForgetArchive('AutoHotkey');
+    Staging := Tmp + '\stage-ahk';
+    Unpack(Tmp + '\AutoHotkey.zip', Staging, 'Unpacking AutoHotkey...');
+    CopyStaged(Staging, ExpandConstant('{app}'), False, 'AutoHotkey64.exe');
+    DelTree(Staging, True, True, True);
+    RecordArchive('AutoHotkey', '{#AhkSha}');
+  end;
 
-  Staging := Tmp + '\stage-engine';
-  Unpack(Tmp + '\engine.zip', Staging, 'Unpacking the whisper.cpp engine...');
-  CopyStaged(Staging, ExpandConstant('{app}\bin'), True, '');
-  DelTree(Staging, True, True, True);
+  if not KeepEngine then begin
+    ForgetArchive('engine');
+    Staging := Tmp + '\stage-engine';
+    Unpack(Tmp + '\engine.zip', Staging, 'Unpacking the whisper.cpp engine...');
+    CopyStaged(Staging, ExpandConstant('{app}\bin'), True, '');
+    DelTree(Staging, True, True, True);
+    RecordArchive('engine', EngineSha);
+  end;
 
-  Staging := Tmp + '\stage-ffmpeg';
-  Unpack(Tmp + '\ffmpeg.zip', Staging, 'Unpacking ffmpeg...');
-  CopyStaged(Staging, ExpandConstant('{app}\bin'), False, 'ffmpeg.exe');
-  DelTree(Staging, True, True, True);
+  if not KeepFfmpeg then begin
+    ForgetArchive('ffmpeg');
+    Staging := Tmp + '\stage-ffmpeg';
+    Unpack(Tmp + '\ffmpeg.zip', Staging, 'Unpacking ffmpeg...');
+    CopyStaged(Staging, ExpandConstant('{app}\bin'), False, 'ffmpeg.exe');
+    DelTree(Staging, True, True, True);
+    RecordArchive('ffmpeg', '{#FfmpegSha}');
+  end;
 
-  Model := TierFile[SelectedTierIndex];
-  WizardForm.StatusLabel.Caption := 'Placing the model...';
-  if not FileCopy(Tmp + '\' + Model, ExpandConstant('{app}\models\') + Model, False) then
-    RaiseException('Could not place the model into ' + ExpandConstant('{app}\models'));
+  if not KeepModel then begin
+    Model := TierFile[SelectedTierIndex];
+    WizardForm.StatusLabel.Caption := 'Placing the model...';
+    if not FileCopy(Tmp + '\' + Model, ExpandConstant('{app}\models\') + Model, False) then
+      RaiseException('Could not place the model into ' + ExpandConstant('{app}\models'));
+  end;
 end;
 
 // ---------------------------------------------------------------------

@@ -168,6 +168,20 @@ AssertTrue 'the installed size is recorded once the downloads have landed' `
     ($iss -match 'ssPostInstall then begin\s+InstallDownloads;\s+RecordInstalledSize;') `
     'RecordInstalledSize no longer runs after InstallDownloads'
 
+# Every upgrade used to download everything again, 3.9 GB on the max
+# tier. What an upgrade keeps rests on downloads.ini, so it has to go
+# with the uninstall, and an entry has to be withdrawn before the unpack
+# it vouches for - or an install that dies half way reads as complete.
+AssertTrue 'downloads.ini goes with the uninstall' `
+    ($iss -match 'Type:\s*files;\s*Name:\s*"\{app\}\\downloads\.ini"') `
+    '[UninstallDelete] no longer removes downloads.ini'
+AssertEq 'every archive is forgotten before it is unpacked' 3 `
+    ([regex]::Matches($iss, "ForgetArchive\('\w+'\);\s+Staging := [^\r\n]+\s+Unpack\(")).Count
+$adds = [regex]::Matches($iss, 'DownloadPage\.Add\(').Count
+AssertTrue 'the installer still downloads all four artefacts' ($adds -eq 4) "$adds calls to DownloadPage.Add"
+AssertEq 'no download bypasses the already-installed check' $adds `
+    ([regex]::Matches($iss, 'if not Keep\w+ then\s+DownloadPage\.Add\(')).Count
+
 # The application rewrites EstimatedSize after a tier change, under the
 # key named after the AppId. A different GUID there would quietly update
 # nothing.
@@ -214,6 +228,19 @@ AssertTrue 'running unelevated, which is how the installer is meant to be used' 
 AssertTrue 'no existing Whispers installation would be clobbered' (-not (Test-Path $regKey)) `
     "uninstall the existing Whispers first: $regKey"
 if (Test-Path $regKey) { exit 1 }
+
+# The key alone is not enough. Inside a packaged host - the Claude
+# desktop app is one - HKCU is virtualised, the real key is invisible,
+# and a run there removed the user's real Start Menu shortcut. The files
+# of a real install are visible either way.
+$realInstall = @(
+    (Join-Path $env:LOCALAPPDATA 'Whispers\unins000.exe'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Whispers\Whispers.lnk'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\Whispers.lnk')
+) | Where-Object { Test-Path $_ }
+AssertTrue 'no file of a real Whispers installation is in the way' ($realInstall.Count -eq 0) `
+    "uninstall the existing Whispers first: $($realInstall -join '; ')"
+if ($realInstall.Count -gt 0) { exit 1 }
 
 # A running instance owns the same INI this test seeds and restores. It
 # saves its configuration on exit, which would land on top of the
@@ -355,6 +382,26 @@ try {
     AssertTrue 'REGRESSION: the size Windows lists includes the downloads' `
         ($shownKb -and ([math]::Abs($shownKb - $actualKb) -le $actualKb * 0.02)) `
         "Windows lists $shownKb KB, the install root holds $actualKb KB"
+
+    Group 'Upgrade in place'
+    # REGRESSION: every upgrade downloaded everything again - 3.9 GB on
+    # the max tier with the CUDA engine, for a release that changed one
+    # script. The same build over itself is the cheapest stand-in for an
+    # upgrade: nothing it would download differs from what is installed.
+    $upgradeLog = Join-Path $env:TEMP 'whispers-setup-upgrade.log'
+    $modelStamp = (Get-Item $modelPath -EA SilentlyContinue).LastWriteTimeUtc
+    $upArgs = $args | ForEach-Object { if ($_ -like '/LOG=*') { "/LOG=$upgradeLog" } else { $_ } }
+    $p = Start-Process -FilePath $setupExe -ArgumentList $upArgs -Wait -PassThru
+    AssertEq 'an install over the installation succeeds' 0 $p.ExitCode
+    $kept = @(Select-String -Path $upgradeLog -SimpleMatch 'is already installed - not downloading it again' `
+              -EA SilentlyContinue).Count
+    AssertEq 'REGRESSION: an upgrade downloads nothing that is already installed' 4 $kept
+    AssertEq 'the installed model was not rewritten' $modelStamp `
+        (Get-Item $modelPath -EA SilentlyContinue).LastWriteTimeUtc
+    $r = Start-Process -FilePath (Join-Path $target 'bin\whisper-server.exe') -ArgumentList '-h' `
+         -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput ([IO.Path]::GetTempFileName()) `
+         -RedirectStandardError ([IO.Path]::GetTempFileName())
+    AssertTrue 'the engine it kept still loads' ($r.ExitCode -ne $DLL_NOT_FOUND) 'the loader returned 0xC0000135'
 
     Group 'Shortcuts'
     $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Whispers\Whispers.lnk'

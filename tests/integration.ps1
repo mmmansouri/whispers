@@ -70,7 +70,10 @@ function LogMatches($pattern) {
 function AssertLog($what, $pattern) {
     $m = LogMatches $pattern
     if (-not $m.Read) { Bad $what "the log could not be read for 2 s: $logFile"; return }
-    AssertTrue $what ($m.Hits.Count -gt 0) "pattern not found in the log: $pattern"
+    # The tail says what the log held instead, which is the first thing
+    # anyone needs when this fails.
+    $tail = if ($m.Hits.Count -eq 0) { ' | log tail: ' + ((Get-Content $logFile -Tail 6 -EA SilentlyContinue) -join ' / ') } else { '' }
+    AssertTrue $what ($m.Hits.Count -gt 0) "pattern not found in the log: $pattern$tail"
 }
 function RefuteLog($what, $pattern) {
     $m = LogMatches $pattern

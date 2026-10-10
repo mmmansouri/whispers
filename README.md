@@ -68,7 +68,7 @@ Diagnostics.
 ### Unattended install
 
 ```
-Whispers-2.2.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
+Whispers-2.3.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
   /DIR="C:\Apps\Whispers" /TIER=balanced /MERGETASKS="!desktopicon"
 ```
 

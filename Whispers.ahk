@@ -56,7 +56,7 @@
 ; =====================================================================
 
 APP_NAME    := "Whispers"
-APP_VERSION := "2.2.1"
+APP_VERSION := "2.3.0"
 
 ; === Paths: root is wherever this script sits ===
 ROOT_DIR   := A_ScriptDir

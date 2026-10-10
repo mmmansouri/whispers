@@ -48,13 +48,34 @@ function Group($name) { Write-Host "`n--- $name ---" -ForegroundColor Cyan }
 function AssertTrue($what, $cond, $detail) {
     if ($cond) { Ok $what } else { Bad $what $detail }
 }
+# Whispers appends to its log while these tests read it, and a read that
+# lands on an append fails with a sharing violation. Read with
+# -EA SilentlyContinue, that failure looked exactly like "no match":
+# measured at 1-2 failed reads in ~5000 during a startup, enough to fail
+# 'it reports its own root directory' in 3 of 7 runs while the line was
+# there. So a failed read is retried, and one that never succeeds is
+# reported as unreadable - never as an absent line, which would make a
+# RefuteLog pass on a log nobody could read.
+function LogMatches($pattern) {
+    if (-not (Test-Path $logFile)) { return @{ Read = $true; Hits = @() } }
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            return @{ Read = $true; Hits = @(Select-String -Path $logFile -Pattern $pattern -EA Stop) }
+        } catch {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    return @{ Read = $false; Hits = @() }
+}
 function AssertLog($what, $pattern) {
-    $hit = Select-String -Path $logFile -Pattern $pattern -EA SilentlyContinue
-    AssertTrue $what ($null -ne $hit) "pattern not found in the log: $pattern"
+    $m = LogMatches $pattern
+    if (-not $m.Read) { Bad $what "the log could not be read for 2 s: $logFile"; return }
+    AssertTrue $what ($m.Hits.Count -gt 0) "pattern not found in the log: $pattern"
 }
 function RefuteLog($what, $pattern) {
-    $hit = Select-String -Path $logFile -Pattern $pattern -EA SilentlyContinue
-    AssertTrue $what ($null -eq $hit) "pattern should be absent but matched: $($hit.Line -join '; ')"
+    $m = LogMatches $pattern
+    if (-not $m.Read) { Bad $what "the log could not be read for 2 s: $logFile"; return }
+    AssertTrue $what ($m.Hits.Count -eq 0) "pattern should be absent but matched: $($m.Hits.Line -join '; ')"
 }
 
 function StopEverything {
@@ -74,7 +95,7 @@ function WaitForLog($pattern, $timeoutSec = 60, $atLeast = 1) {
     $deadline = (Get-Date).AddSeconds($timeoutSec)
     while ((Get-Date) -lt $deadline) {
         if (Test-Path $logFile) {
-            $n = @(Select-String -Path $logFile -Pattern $pattern -EA SilentlyContinue).Count
+            $n = (LogMatches $pattern).Hits.Count
             if ($n -ge $atLeast) { return $true }
         }
         Start-Sleep -Milliseconds 300
@@ -273,7 +294,7 @@ try {
     RefuteLog 'no conversion failure' 'WAV conversion failed'
     RefuteLog 'the CPU fallback is not needed' 'falling back to whisper-cli'
 
-    $line = (Select-String -Path $logFile -Pattern 'Transcribed via server in (\d+) ms' | Select-Object -Last 1)
+    $line = (LogMatches 'Transcribed via server in (\d+) ms').Hits | Select-Object -Last 1
     if ($line) {
         $ms = [int]$line.Matches[0].Groups[1].Value
         Write-Host "         first dictation: $ms ms" -ForegroundColor DarkGray

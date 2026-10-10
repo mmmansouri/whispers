@@ -49,7 +49,7 @@
 ; =====================================================================
 
 APP_NAME    := "Whispers"
-APP_VERSION := "2.2.0"
+APP_VERSION := "2.2.1"
 
 ; === Paths: root is wherever this script sits ===
 ROOT_DIR   := A_ScriptDir

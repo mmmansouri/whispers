@@ -111,6 +111,11 @@ Write-Host "pins.iss regenerated from versions.json ($($lines.Count) lines)."
 
 if ($PinsOnly) { exit 0 }
 
+# The WebView2 binding is built into the installer. It is fetched here,
+# hash and signature checked, so a build can never ship without it.
+& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'fetch-vendor.ps1')
+if ($LASTEXITCODE -ne 0) { Fail 'tools\fetch-vendor.ps1 failed' }
+
 $iscc = @(
     "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",

@@ -212,7 +212,9 @@ AssertTrue 'no tray state uses a stock shell32 icon' `
 # much less obvious moment.
 $sources = [regex]::Matches($iss, 'Source:\s*"\.\.\\([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
 AssertTrue 'the .iss ships at least the script, the core and the pins' ($sources.Count -ge 5) "$($sources.Count) entries"
-$missing = @($sources | Where-Object { -not (Get-Item (Join-Path $root $_) -EA SilentlyContinue) })
+# vendor\ is fetched by the build, never committed: its files are pinned
+# and checked below instead.
+$missing = @($sources | Where-Object { $_ -notlike 'vendor\*' -and -not (Get-Item (Join-Path $root $_) -EA SilentlyContinue) })
 AssertTrue 'every file the .iss ships exists' ($missing.Count -eq 0) ($missing -join '; ')
 
 # The icon family replaces shell32's stock icons. tools\build-icons.ps1
@@ -298,8 +300,64 @@ AssertTrue 'the engine DLLs nothing loads are neither copied nor kept by an upgr
 AssertTrue 'the uninstall removes the scratch directory with the last dictation' `
     ($iss -match 'Type: filesandordirs; Name: "\{%TEMP\}\\Whispers"') '%TEMP%\Whispers is left behind'
 
+# The settings window and the setup as pages (ADR-0001). The binding is
+# pinned like every other artefact, fetched with its hashes and the DLL's
+# signature checked, and built into the installer - which refuses to
+# compile without it, so no build can quietly ship the fallback only.
+$wv = $version.webview2
+AssertTrue 'the WebView2 binding is pinned to a full commit' ($wv.commit -match '^[0-9a-f]{40}$') "commit '$($wv.commit)'"
+$wvFiles = @($wv.files.PSObject.Properties)
+AssertTrue 'every vendored file carries a SHA-256 pin' `
+    (($wvFiles.Count -ge 5) -and (@($wvFiles | Where-Object { $_.Value -notmatch '^[0-9a-f]{64}$' }).Count -eq 0)) `
+    (($wvFiles | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join '; ')
+AssertTrue "the pins include Microsoft's loader DLL and the binding's licence" `
+    ((@($wvFiles.Name) -contains 'WebView2/64bit/WebView2Loader.dll') -and (@($wvFiles.Name) -contains 'LICENSE')) (@($wvFiles.Name) -join ', ')
+$fetch = Get-Content (Join-Path $root 'tools\fetch-vendor.ps1') -Raw
+AssertTrue 'the fetch checks every hash and the DLL signature' `
+    (($fetch -match 'Sha256 \$part') -and ($fetch -match 'Get-AuthenticodeSignature')) 'tools\fetch-vendor.ps1 no longer verifies'
+$build = Get-Content (Join-Path $root 'tools\build-installer.ps1') -Raw
+AssertTrue 'every installer build fetches the binding first' ($build -match 'fetch-vendor\.ps1') 'build-installer.ps1 does not call fetch-vendor.ps1'
+AssertTrue 'the installer refuses to compile without it' `
+    ($iss -match '#ifnexist "\.\.\\vendor\\ahk2_lib\\WebView2\\WebView2\.ahk"\s+#error') 'no #ifnexist guard on vendor\'
+AssertTrue 'the installer ships the pages and the binding' `
+    (($iss -match 'Source: "\.\.\\ui\\\*"') -and ($iss -match 'Source: "\.\.\\vendor\\ahk2_lib\\\*";[^\r\n]*recursesubdirs')) 'ui\ or vendor\ is not in [Files]'
+$appSrc = Get-Content (Join-Path $root 'Whispers.ahk') -Raw
+AssertTrue 'a checkout without the binding still starts' `
+    ($appSrc -match '#Include \*i %A_LineFile%\\\.\.\\vendor\\ahk2_lib\\WebView2\\WebView2\.ahk') 'the binding is included without *i'
+
+# The installer offers the runtime exactly where the application would
+# not find it, and a refusal or a failure changes nothing else.
+$client = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+AssertTrue 'the installer and the application look for the runtime under the same key' `
+    ($iss.Contains($client) -and $appSrc.Contains($client)) 'the EdgeUpdate client GUID differs'
+AssertTrue 'the runtime is only offered where it is missing' `
+    ($iss -match '\(PageID = WebViewPage\.ID\) and not WebViewMissing') 'ShouldSkipPage no longer hides the page'
+AssertTrue "the bootstrapper runs only once Microsoft's signature is checked" `
+    ($iss -match '(?s)if not MicrosoftSigned\(Setup\) then begin.*?Exit;.*?Exec\(Setup') 'the signature check is gone, or comes after the run'
+AssertTrue 'declining installs nothing, and the Ready page says what that means' `
+    (($iss -match 'WebViewMissing and WebViewPage\.Values\[0\]') -and ($iss -match 'not installed - Whispers will use its classic windows')) 'the decline path changed'
+AssertTrue 'a failed runtime install never fails the installation' `
+    ([regex]::Matches($iss, 'continuing, Whispers will use its classic windows').Count -eq 3) 'a failure path no longer logs and continues'
+AssertTrue "Whispers' WebView2 processes are stopped along with it" `
+    ($iss -match "msedgewebview2\.exe'' -and \`$_\.CommandLine -like ''\*\\Whispers\\WebView2\*''") 'StopRunningWhispers leaves the browser processes holding the profile'
+
+# The pages follow the rule of every other source, and must parse: a
+# syntax error leaves a page that never asks for its state, an empty
+# window with nothing in the log.
+$uiNonAscii = @(Get-ChildItem (Join-Path $root 'ui') -File | Where-Object {
+    @([IO.File]::ReadAllBytes($_.FullName) | Where-Object { $_ -gt 127 }).Count -gt 0 } | ForEach-Object Name)
+AssertTrue 'every page file is ASCII' ($uiNonAscii.Count -eq 0) ($uiNonAscii -join ', ')
+$node = Get-Command node -EA SilentlyContinue
+$unparsed = @()
+if ($node) {
+    $unparsed = @(Get-ChildItem (Join-Path $root 'ui') -Filter *.js | Where-Object {
+        & $node.Source --check $_.FullName 2>$null; $LASTEXITCODE -ne 0 } | ForEach-Object Name)
+}
+AssertTrue 'every page script parses' ($node -and $unparsed.Count -eq 0) `
+    $(if ($node) { $unparsed -join ', ' } else { 'Node.js is needed for this check' })
+
 # Encoding discipline, same rule as every other Windows-only source.
-foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), (Join-Path $root 'tools\build-sounds.ps1'), $PSCommandPath)) {
+foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), (Join-Path $root 'tools\build-sounds.ps1'), (Join-Path $root 'tools\fetch-vendor.ps1'), $PSCommandPath)) {
     $bytes = [System.IO.File]::ReadAllBytes($f)
     $name  = Split-Path $f -Leaf
     AssertTrue "$name is ASCII" (@($bytes | Where-Object { $_ -gt 127 }).Count -eq 0) 'non-ASCII bytes present'
@@ -396,6 +454,16 @@ try {
     $libExpected = @(Get-ChildItem (Join-Path $root 'lib') -Filter '*.ahk').Count
     $libCount = @(Get-ChildItem (Join-Path $target 'lib') -Filter '*.ahk' -EA SilentlyContinue).Count
     AssertEq 'the whole pure core is installed' $libExpected $libCount
+    $uiExpected = @(Get-ChildItem (Join-Path $root 'ui') -File).Count
+    $uiCount = @(Get-ChildItem (Join-Path $target 'ui') -File -EA SilentlyContinue).Count
+    AssertEq 'both pages are installed, with everything they load' $uiExpected $uiCount
+    # The binding as pinned, file by file: a wrong one would not fail the
+    # install, only quietly send every window to the classic fallback.
+    $wrongVendor = @($version.webview2.files.PSObject.Properties | Where-Object {
+        $f = Join-Path $target ('vendor\ahk2_lib\' + ($_.Name -replace '/', '\'))
+        -not (Test-Path $f) -or (Get-FileHash $f -Algorithm SHA256).Hash.ToLower() -ne $_.Value
+    } | ForEach-Object Name)
+    AssertTrue 'the WebView2 binding is installed exactly as pinned' ($wrongVendor.Count -eq 0) ($wrongVendor -join ', ')
 
     foreach ($f in 'whisper-server.exe', 'whisper-cli.exe', 'ffmpeg.exe') {
         AssertTrue "bin\$f is installed" (Test-Path (Join-Path $target "bin\$f")) "missing from $target\bin"

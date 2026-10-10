@@ -17,9 +17,12 @@ Run these from **PowerShell**, not Git Bash: MSYS rewrites the `/ErrorStdOut` sw
 # Installer suite, static half - sources vs versions.json, ASCII/CRLF checks. Runs in CI.
 pwsh -File tests\installer.ps1 -StaticOnly
 
-# Build dist\Whispers-<version>-setup.exe (needs Inno Setup 6.7+)
+# Build dist\Whispers-<version>-setup.exe (needs Inno Setup 6.7+); fetches vendor\ first
 .\tools\build-installer.ps1
 .\tools\build-installer.ps1 -PinsOnly      # only regenerate installer\pins.iss
+
+# Fetch the pinned WebView2 binding into vendor\ (once per checkout; without it the classic windows are used)
+.\tools\fetch-vendor.ps1
 ```
 
 Local-only, side-effectful — do not run unprompted:
@@ -32,7 +35,7 @@ pwsh -File tests\installer.ps1 -Engine auto  # same on the real CUDA path, ~1.2 
 
 There is no single-test selector. `tests\run-tests.ahk` is one flat script of `Group(...)` sections using `Eq/Yes/No/Has/Lacks`; run it all (it takes about a second) and read the relevant group in `tests\results.txt`.
 
-`AutoHotkey64.exe`, `bin\`, `models\`, `dist\` and `installer\pins.iss` are gitignored: fetched or generated, never committed. A dev checkout points at a local whisper.cpp build through `[Paths] BinDir=/ModelsDir=` in `%APPDATA%\Whispers\Whispers.ini`.
+`AutoHotkey64.exe`, `bin\`, `models\`, `vendor\`, `dist\` and `installer\pins.iss` are gitignored: fetched or generated, never committed. A dev checkout points at a local whisper.cpp build through `[Paths] BinDir=/ModelsDir=` in `%APPDATA%\Whispers\Whispers.ini`.
 
 ## Architecture
 
@@ -50,6 +53,15 @@ There is no single-test selector. `tests\run-tests.ahk` is one flat script of `G
 - `lib\Install.ahk` — the uninstall entry Windows lists (AppId, key, `EstimatedSize` in KB) and whether a directory is the registered installation.
 - `lib\Tray.ahk` — the tray's wording and icon per state; the menu is rebuilt from it each time it opens.
 - `lib\Indicator.ahk` — the indicator's arithmetic: width per state, the spring and fade steps, voice level from s16le samples, and its text. The GDI+ drawing is in `Whispers.ahk` (ADR-0002).
+- `lib\Web.ahk` — the pages' side that needs no window (ADR-0001): WebView2 runtime version check, theme and accent, JSON out, a strict flat JSON parser in, and the **one list of the messages** between the pages and `Whispers.ahk` (`UiMessageSpec`, `UiSettableKeys`, `UiSettingValue`). A message from a page is untrusted input: anything not exactly in that list is dropped.
+
+### The settings window and the first-run setup (ADR-0001)
+
+`ui\` holds the two pages (`settings.html`, `setup.html`, plain HTML/CSS/JS, no build step, ASCII). `Whispers.ahk` ("Web pages" section) hosts each in a Gui window through the WebView2 binding in `vendor\ahk2_lib\` (pinned in `versions.json`, `#Include *i` so a checkout without it still starts). The pages are served from `ui\` as `https://whispers.example/`; any other navigation is cancelled. The pages never touch settings themselves: they send `{op}` messages, `WebHandle` applies them through `ConfigSpec()` and answers with `{ev}` messages. WebView2 is created lazily when a window opens and released when the last one closes - never on the dictation path. `WebUnavailable()` decides the classic (native) windows instead: `NativeWindows=1`, no binding, no runtime, or a creation that failed this session. Keep the native `ShowSettingsNative` / `ShowFirstRunNative` working: they are the fallback.
+
+Two traps measured while building it: keyboard focus must be handed to the WebView2 control whenever its window activates (`WebOnActivate`) - left on the host window, F10/Alt put it in menu mode, a modal loop in which AutoHotkey starts no thread, dictation included; and WebView2 callbacks must not do slow work inline - `WebOnMessage` defers everything to a timer thread. The microphone meters read Windows' WASAPI peak meter (`MeterOpen`), not ffmpeg, so they never compete with a dictation's recorder.
+
+To work on a page, run the checkout in a throwaway profile (`APPDATA` pointed elsewhere) with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` and drive it over the DevTools protocol; F12 also works in a checkout (`.git` present).
 
 ### Dictation pipeline
 
@@ -75,12 +87,13 @@ Raising a pin is manual and deliberate: edit `versions.json`, run the validation
 - The VRAM thresholds live in `lib\Tiers.ahk` **and** in `installer\Whispers.iss` `[Code]`, because the installer runs before the app exists on disk. Change both.
 - The AppId lives in `[Setup]` of `installer\Whispers.iss` **and** in `AppId()` of `lib\Install.ahk`: the app rewrites `EstimatedSize` in the uninstall entry named after it. Never change it - upgrades are matched on it.
 - The AppUserModelID lives on every shortcut in `[Icons]` of `installer\Whispers.iss` **and** in `AppUserModelId()` of `lib\Install.ahk`: Windows titles the app's notifications after the shortcut carrying the ID the process declares.
+- The WebView2 runtime's registry client GUID lives in `WebRuntimeVersion()` (`Whispers.ahk`) **and** in `WEBVIEW2_CLIENT` (`installer\Whispers.iss` `[Code]`): the installer offers the runtime exactly where the app would not find it.
 
 ## Conventions
 
 - `.ahk`, `.iss` and `.ps1` files are **pure ASCII with CRLF** line endings — asserted by the static installer suite, enforced on checkout by `.gitattributes`. No em dashes, arrows, accented characters or smart quotes in code or comments; write `-` and `->`.
 - Comments explain *why*, usually naming the concrete bug or measurement behind a decision. Match that density and tone when editing.
-- A bug that reached the running product gets a test marked `REGRESSION` and a row in the README table "What the REGRESSION assertions are for". README also states assertion counts per suite (unit 403, integration 53, installer 106) — update them when adding tests.
+- A bug that reached the running product gets a test marked `REGRESSION` and a row in the README table "What the REGRESSION assertions are for". README also states assertion counts per suite (unit 539, integration 53, installer 126) — update them when adding tests.
 - Every failure path reports the real cause via `Fail(msg, detail)` with the tail of the relevant log (`%APPDATA%\Whispers\logs\`), never a bare "failed".
 - Per-user only: no administrator rights anywhere (installer is `PrivilegesRequired=lowest`, server port clamped to ≥1024, loopback only).
 - User data lives outside the install root: `%APPDATA%\Whispers\` (INI, logs, `history.tsv`), scratch in `%TEMP%\Whispers\`. Both the integration and installer suites back up and restore the real INI.

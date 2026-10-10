@@ -78,6 +78,37 @@
     }
   },
 
+  "webview2": {
+    "_comment": [
+      "What the settings window and the first-run setup need to host",
+      "their pages in WebView2 (ADR-0001): thqby's AutoHotkey v2 binding,",
+      "the two files of the same library it includes, and the x64",
+      "WebView2Loader.dll it ships, which is Microsoft's own, signed.",
+      "Fetched from the repository at this exact commit, never 'master',",
+      "by tools/fetch-vendor.ps1 into vendor/, and built into the",
+      "installer: they are part of the program rather than something to",
+      "download on the user's machine. The fetch also checks that the DLL",
+      "carries a valid Microsoft Authenticode signature.",
+      "The WebView2 runtime itself is not pinned: it belongs to Windows,",
+      "which updates it. See README.md, 'WebView2'."
+    ],
+    "repo": "thqby/ahk2_lib",
+    "commit": "559839b58353e31ec90796d1c2609c8f40b721f2",
+    "loader_version": "1.0.3595.46",
+    "files": {
+      "WebView2/WebView2.ahk": "3192ab02c276e06ea4fc16524128b2ecb02bddbbade79f118f5a76d61e4604fc",
+      "WebView2/64bit/WebView2Loader.dll": "bf2fefaff7fd4775ea1e07328cc3142721943948f16d261fb82cbd978b7f99e2",
+      "ComVar.ahk": "4102d3bfc358b17565547aee155214367f7ea8110db1d81ccde6398054ab3215",
+      "Promise.ahk": "9369562490fb509943b93fd603fa553c42347f5fbd108dacc6079ea7759a4c30",
+      "LICENSE": "04f7279fa5e9f2657a3f8539d2c3481b45dfac741b176cbad432d8d29b18e143"
+    },
+    "validated": {
+      "date": "2026-10-10",
+      "host": "Windows 11 26200, WebView2 runtime 155.0.4283.45",
+      "checks": ["controller created on AutoHotkey v2.0.28", "web message round trip", "virtual host mapping", "transparent background over Mica"]
+    }
+  },
+
   "ffmpeg": {
     "repo": "GyanD/codexffmpeg",
     "tag": "9.0.2",

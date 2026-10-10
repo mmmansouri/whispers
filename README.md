@@ -37,15 +37,33 @@ root, including everything that was downloaded into it. Your settings, logs and 
 
 ### The first time you run it
 
-A new installation opens a short setup window. It picks your microphone,
-lets you change the hotkey and the language, and then asks you to **hold
-the hotkey and say a sentence**. What you dictate appears in the window
-and is pasted nowhere, so you can test it with any window behind.
+A new installation opens a short setup, one step at a time: every
+microphone with its live level (the one that hears you is the one that
+moves), the dictation key and the language, the model if it is not on
+disk yet, and then **hold the key and say a sentence**. What you dictate
+appears in the window and is pasted nowhere, so you can test it with any
+window behind. Closing the window at any step keeps what you chose.
 
 That last step is the point: it runs the real pipeline — microphone,
 ffmpeg, the resident server, the model — rather than telling you that
 everything looks configured. It is reachable again afterwards from the
 tray menu, and an upgrade from a working installation never sees it.
+
+### The settings window
+
+Five sections — General, Engine, History, Diagnostics, About — and no Save
+button: a change applies as soon as you make it, and a value that has to
+be clamped (a port below 1024) shows the value actually kept. Changing
+tier is the one exception: it says what it will download and asks first,
+then shows the download inside the window. The theme follows Windows'
+light or dark mode, or the one you pick under About, and switches live.
+
+Both windows are web pages shown with Microsoft Edge WebView2, built into
+Windows 11 and nearly every Windows 10 (see "WebView2" below). Without
+it, Whispers shows its classic windows instead — the plainer ones of
+2.2 — and works exactly the same; so it does with `NativeWindows=1` in
+the `[UI]` section of `Whispers.ini`, or "Use the classic windows" under
+Diagnostics.
 
 ### Unattended install
 
@@ -60,6 +78,7 @@ Whispers-2.2.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART ^
 | `/ENGINE=cpu` | Forces the CPU engine build on a machine that could run CUDA — for when the GPU is reserved for something else. |
 | `/DIR=` | Install root. |
 | `/MERGETASKS=` | `!desktopicon`, `!startup` to opt out; the startup entry is on by default. |
+| `/WEBVIEW2=skip` | Never installs the WebView2 runtime, even where it is missing: Whispers then uses its classic windows. (`/WEBVIEW2=missing` pretends it is missing, to see the offer on a machine that has it.) |
 
 Without `/TIER=`, a silent install takes the tier the hardware suggests,
 or the one already configured if Whispers was installed before.
@@ -70,7 +89,9 @@ or the one already configured if Whispers was installed before.
 .\tools\build-installer.ps1
 ```
 
-It projects `versions.json` into `installer\pins.iss` and compiles with
+It fetches the pinned WebView2 binding into `vendor\` (through
+`.\tools\fetch-vendor.ps1`, which a development checkout also runs once),
+projects `versions.json` into `installer\pins.iss`, and compiles with
 [Inno Setup](https://jrsoftware.org/isinfo.php) 6.7 or newer
 (`winget install JRSoftware.InnoSetup`); the script refuses an older
 compiler, which could not build its light/dark wizard. Every URL and hash the
@@ -80,7 +101,7 @@ twice — and `installer\Whispers.iss` refuses to compile without
 values.
 
 The icons and the installer's images under `assets\` are drawn by
-`.	oolsuild-icons.ps1` and committed. The mark is drawn at every size
+`.\tools\build-icons.ps1` and committed. The mark is drawn at every size
 rather than scaled down from one master, so the 16 px tray icon keeps
 four distinct bars; rerun the script after changing the drawing, and it
 writes byte-identical files when nothing changed. The four sounds under
@@ -118,6 +139,34 @@ signed yet.
 The same machinery fetches models, and there the guarantee is the full
 one: a model's hash comes from `versions.json`, not from whoever served
 the file.
+
+### WebView2
+
+The settings window and the first-run setup are pages shown with
+Microsoft Edge WebView2. Two parts, guaranteed differently:
+
+* **What Whispers ships** — the AutoHotkey binding (thqby/ahk2_lib) and
+  Microsoft's `WebView2Loader.dll` — is pinned in `versions.json` by
+  commit and SHA-256, fetched at build time with the DLL's Microsoft
+  signature checked, and built into the installer. The pages themselves
+  are files in `ui\`, loaded from disk; nothing is fetched from the
+  network to show them, and they cannot navigate anywhere else (a link
+  opens your browser).
+* **The runtime** belongs to Windows, which keeps it up to date, so it
+  is not pinned. On the rare machine without it, the installer offers to
+  install it for your account only, without administrator rights. That
+  runs Microsoft's own bootstrapper, which always fetches the current
+  runtime: like an update's digest, nothing in this repository can
+  vouch for its content in advance. What the installer does check is
+  that the bootstrapper carries a valid Microsoft Authenticode signature
+  — otherwise it is not run. Declined, failed or skipped, nothing else
+  changes: Whispers uses its classic windows.
+
+WebView2 starts only when one of the two windows opens — never at
+startup, so a dictation never waits on it — and its processes end when
+the window closes. Its browser profile, which holds nothing worth
+keeping, lives in `%TEMP%\Whispers\WebView2` and goes with the
+uninstall.
 
 ---
 
@@ -187,9 +236,11 @@ its own location.
   bin\                   whisper-server, whisper-cli, ffmpeg, DLLs
   models\                the one model for the selected tier
   assets\                icons, sounds and installer images
+  ui\                    the settings and setup pages (HTML, CSS, JS)
+  vendor\ahk2_lib\       the pinned WebView2 binding and its loader DLL
 
 %APPDATA%\Whispers\      Whispers.ini, logs\, history.tsv
-%TEMP%\Whispers\         capture scratch files
+%TEMP%\Whispers\         capture scratch files, WebView2's browser profile
 ```
 
 `bin\` and `models\` can be moved through the `[Paths]` section of
@@ -214,6 +265,11 @@ Two things worth knowing about upstream:
   pinning `v1.9.4` would download nothing.
 * the CUDA archives bundle their own `cudart`/`cublas` DLLs, so a target
   machine needs an NVIDIA driver but **no CUDA Toolkit**.
+
+The WebView2 binding is pinned to a commit of its repository rather than
+a release, and each of its five files by its own SHA-256; raising it
+means re-running the settings window and the setup by hand, since no
+suite drives the pages.
 
 ### Raising a pinned version
 
@@ -248,6 +304,9 @@ microphone at −80.3 dB. When the fallback is used, the log says so.
 * An NVIDIA GPU for the GPU tiers — driver only, no CUDA Toolkit.
   Without one, Whispers installs in CPU mode and reports the measured
   latency so you know what you are getting.
+* The Microsoft Edge WebView2 runtime for the settings window and the
+  setup — part of Windows 11 and nearly every Windows 10, offered by the
+  installer otherwise. Without it, the classic windows.
 
 Everything else — the whisper.cpp binaries, ffmpeg, AutoHotkey and the
 model — is fetched or shipped by the installer. Nothing needs to be
@@ -257,7 +316,7 @@ installed system-wide and no administrator rights are required.
 
 Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 403 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 539 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.
@@ -280,7 +339,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 106 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 126 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI
@@ -336,8 +395,11 @@ hand. They exist so it cannot happen twice.
 
 ### What neither suite covers
 
-Transcription accuracy on real speech, the setup window, the settings
-window and the tray menu. Those need a human.
+Transcription accuracy on real speech, how the setup and the settings
+window look, and the tray menu. Those need a human. What the pages send
+is covered at the unit level: every message is parsed by the strict
+parser in `lib/Web.ahk` and checked against a fixed list of operations
+and settings, and the static half checks that every page script parses.
 
 So does the last step of an update. The suites prove that a release is
 found, compared, downloaded and checked against its digest, and that a

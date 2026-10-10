@@ -27,6 +27,13 @@
 #ifnexist "pins.iss"
   #error pins.iss is missing - build through tools\build-installer.ps1, not ISCC directly
 #endif
+; The WebView2 binding is shipped, not downloaded at install time, and
+; tools\build-installer.ps1 fetches it (tools\fetch-vendor.ps1) before
+; compiling. Without it every installation would silently fall back to
+; the native windows.
+#ifnexist "..\vendor\ahk2_lib\WebView2\WebView2.ahk"
+  #error vendor\ is missing - build through tools\build-installer.ps1, which fetches it
+#endif
 #include "pins.iss"
 
 #define AppName "Whispers"
@@ -121,6 +128,10 @@ Source: "..\assets\Whispers.ico"; DestDir: "{app}\assets";      Flags: ignorever
 Source: "..\assets\tray\*.ico";   DestDir: "{app}\assets\tray"; Flags: ignoreversion
 ; Synthesized by tools\build-sounds.ps1.
 Source: "..\assets\sounds\*.wav"; DestDir: "{app}\assets\sounds"; Flags: ignoreversion
+; The settings window and the first-run setup (ADR-0001): the pages, and
+; the pinned WebView2 binding with Microsoft's loader DLL and its licence.
+Source: "..\ui\*";               DestDir: "{app}\ui";              Flags: ignoreversion
+Source: "..\vendor\ahk2_lib\*";  DestDir: "{app}\vendor\ahk2_lib"; Flags: ignoreversion recursesubdirs
 
 [INI]
 ; Seed the tier the user picked in the wizard. Every other setting keeps
@@ -168,7 +179,9 @@ const
 
 var
   TierPage:     TInputOptionWizardPage;
+  WebViewPage:  TInputOptionWizardPage;
   DownloadPage: TDownloadWizardPage;
+  WebViewMissing: Boolean;
 
   TierKey:   array[0..TIER_COUNT-1] of String;
   TierFile:  array[0..TIER_COUNT-1] of String;
@@ -283,11 +296,17 @@ begin
   // A single quote is legal in a Windows path and closes a PowerShell
   // literal; doubling it is how PowerShell escapes it.
   StringChangeEx(Root, '''', '''''', True);
+  // The pages' WebView2 processes run from Microsoft's runtime, not from
+  // {app}. They are ours when they use Whispers' browser profile, and are
+  // stopped too, so that the profile in %TEMP%\Whispers can be deleted.
   Cmd := '$r = ''' + Root + '''; ' +
          '$p = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ' +
          '$_.Path -and $_.Path.StartsWith($r, [StringComparison]::OrdinalIgnoreCase) }); ' +
          '$p | Stop-Process -Force -ErrorAction SilentlyContinue; ' +
-         '$p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue';
+         '$p | Wait-Process -Timeout 10 -ErrorAction SilentlyContinue; ' +
+         'Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ' +
+         '$_.Name -eq ''msedgewebview2.exe'' -and $_.CommandLine -like ''*\Whispers\WebView2*'' } | ' +
+         'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
   if Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
           '-NoProfile -NonInteractive -Command "' + Cmd + '"',
           '', SW_HIDE, ewWaitUntilTerminated, Code) then
@@ -384,6 +403,100 @@ begin
     Result := 0
   else
     Result := 3;
+end;
+
+// ---------------------------------------------------------------------
+// The WebView2 runtime (ADR-0001)
+//
+// The settings window and the first-run setup are pages shown with
+// Microsoft Edge WebView2. It ships with Windows 11 and nearly every
+// Windows 10; where it is missing, the user is offered a per-user install
+// (Microsoft's bootstrapper, run without elevation, installs for the
+// current account only). Declined or failed, nothing else changes:
+// Whispers uses its classic windows.
+//
+// Looked up where the application looks (WebRuntimeVersion in
+// Whispers.ahk): per user, then per machine. An uninstall leaves the
+// version "0.0.0.0" behind instead of removing the value.
+// ---------------------------------------------------------------------
+
+const
+  WEBVIEW2_CLIENT = '\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  // Microsoft's Evergreen bootstrapper. Unlike everything else here it is
+  // not pinned: it always fetches the current runtime, which Windows then
+  // keeps up to date. Its Authenticode signature is checked instead.
+  WEBVIEW2_BOOTSTRAPPER = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
+
+function WebView2Registered(const Root: Integer; const Key: String): Boolean;
+var
+  Version: String;
+begin
+  Result := RegQueryStringValue(Root, Key, 'pv', Version) and
+            (Version <> '') and (Version <> '0.0.0.0');
+end;
+
+// /WEBVIEW2=missing pretends the runtime is absent, so that the offer can
+// be walked through on a machine that has it.
+function WebView2Present: Boolean;
+begin
+  if CompareText(ExpandConstant('{param:webview2|}'), 'missing') = 0 then
+    Result := False
+  else
+    Result := WebView2Registered(HKCU, 'Software' + WEBVIEW2_CLIENT) or
+              WebView2Registered(HKLM32, 'SOFTWARE' + WEBVIEW2_CLIENT) or
+              WebView2Registered(HKLM64, 'SOFTWARE' + WEBVIEW2_CLIENT);
+end;
+
+// Only when the page was shown and its box left ticked. /WEBVIEW2=skip
+// declines in an unattended install, which never shows the page.
+function WantWebView2: Boolean;
+begin
+  Result := WebViewMissing and WebViewPage.Values[0] and
+            (CompareText(ExpandConstant('{param:webview2|}'), 'skip') <> 0);
+end;
+
+function MicrosoftSigned(const Path: String): Boolean;
+var
+  P, Cmd: String;
+  Code: Integer;
+begin
+  P := Path;
+  StringChangeEx(P, '''', '''''', True);
+  Cmd := '$s = Get-AuthenticodeSignature -LiteralPath ''' + P + '''; ' +
+         'if ($s.Status -eq ''Valid'' -and $s.SignerCertificate.Subject -like ''CN=Microsoft Corporation,*'') ' +
+         '{ exit 0 } else { exit 1 }';
+  Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+                 '-NoProfile -NonInteractive -Command "' + Cmd + '"',
+                 '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+// Never fails the installation: Whispers works without the runtime.
+procedure InstallWebView2;
+var
+  Setup: String;
+  Code: Integer;
+begin
+  if not WantWebView2 then
+    Exit;
+  WizardForm.StatusLabel.Caption := 'Installing Microsoft Edge WebView2 for your account...';
+  try
+    DownloadTemporaryFile(WEBVIEW2_BOOTSTRAPPER, 'MicrosoftEdgeWebview2Setup.exe', '', nil);
+  except
+    Log('WebView2 bootstrapper download failed: ' + GetExceptionMessage +
+        ' - continuing, Whispers will use its classic windows');
+    Exit;
+  end;
+  Setup := ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe');
+  if not MicrosoftSigned(Setup) then begin
+    Log('The WebView2 bootstrapper is not signed by Microsoft - not run; ' +
+        'continuing, Whispers will use its classic windows');
+    Exit;
+  end;
+  if Exec(Setup, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, Code) and WebView2Present then
+    Log('WebView2 runtime installed for the current user (exit ' + IntToStr(Code) + ')')
+  else
+    Log('WebView2 runtime not installed (exit ' + IntToStr(Code) +
+        ') - continuing, Whispers will use its classic windows');
 end;
 
 // ---------------------------------------------------------------------
@@ -552,9 +665,28 @@ begin
     Preselect := RecommendTierIndex;
   TierPage.Values[Preselect] := True;
 
+  WebViewMissing := not WebView2Present;
+  WebViewPage := CreateInputOptionPage(TierPage.ID,
+    'Microsoft Edge WebView2',
+    'What the settings window and the first-run setup are shown with.',
+    'Whispers shows its settings and its first-run setup with Microsoft Edge ' +
+    'WebView2, which is not installed on this PC. It installs for your account ' +
+    'only, without administrator rights: a small program from Microsoft, which ' +
+    'then downloads the runtime (about 150 MB).' + #13#10#13#10 +
+    'Without it, dictation works exactly the same, and Whispers uses its classic windows.',
+    False, False);
+  WebViewPage.Add('Install Microsoft Edge WebView2 for my account (recommended)');
+  WebViewPage.Values[0] := True;
+
   DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing),
                                      SetupMessage(msgPreparingDesc), nil);
   DownloadPage.ShowBaseNameInsteadOfUrl := True;
+end;
+
+// The WebView2 page is for machines without the runtime only.
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = WebViewPage.ID) and not WebViewMissing;
 end;
 
 // Only the cheap checks run here; hashing the model waits for Next, so
@@ -603,6 +735,13 @@ begin
     Result := Result + 'Will download:' + NewLine + Fetch + NewLine;
   Result := Result +
             'Every download is rejected unless its SHA-256 matches versions.json.' + NewLine;
+  if WantWebView2 then
+    Result := Result + NewLine + 'Microsoft Edge WebView2:' + NewLine + Space +
+              'installed for your account by Microsoft''s own installer, once its' + NewLine + Space +
+              'signature is checked (not pinned: it installs the current runtime)' + NewLine
+  else if WebViewMissing then
+    Result := Result + NewLine + 'Microsoft Edge WebView2:' + NewLine + Space +
+              'not installed - Whispers will use its classic windows' + NewLine;
   if MemoTasksInfo <> '' then
     Result := Result + NewLine + MemoTasksInfo;
 end;
@@ -830,6 +969,7 @@ begin
   if CurStep = ssPostInstall then begin
     InstallDownloads;
     RecordInstalledSize;
+    InstallWebView2;
   end;
 end;
 

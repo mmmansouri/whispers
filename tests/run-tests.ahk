@@ -26,6 +26,7 @@
 #Include %A_LineFile%\..\..\lib\Install.ahk
 #Include %A_LineFile%\..\..\lib\Indicator.ahk
 #Include %A_LineFile%\..\..\lib\Tray.ahk
+#Include %A_LineFile%\..\..\lib\Web.ahk
 
 gPass := 0
 gFail := 0
@@ -399,7 +400,7 @@ No("HasValue on an empty list", HasValue([], "a"))
 Group("Config - schema")
 
 spec := ConfigSpec()
-Eq("eighteen settings", spec.Count, 18)
+Eq("twenty settings", spec.Count, 20)
 for key, def in spec {
     Yes(key " declares a section", def[1] != "")
     Yes(key " sits in a known section", HasValue(["Audio", "Engine", "Paths", "UI"], def[1]))
@@ -466,9 +467,192 @@ Eq("setup has not run by default", spec["Configured"][2], "0")
 Eq("both are UI settings", spec["CheckUpdates"][1], "UI")
 No("sometimes is not a policy", IsValidPolicy("sometimes"))
 
+Yes("fr is a language", IsValidLanguage("fr"))
+Yes("auto is a language", IsValidLanguage("auto"))
+No("de is not offered", IsValidLanguage("de"))
+Yes("the theme follows Windows by default", spec["Theme"][2] = "system")
+Yes("the default theme is a real theme", IsValidTheme(spec["Theme"][2]))
+Yes("dark is a theme", IsValidTheme("dark"))
+No("blue is not a theme", IsValidTheme("blue"))
+; The native windows are the fallback, not the default.
+Eq("the web pages are used by default", spec["NativeWindows"][2], "0")
+
 Eq("one second of 16 kHz mono 16-bit is 32000 bytes", RawBytesToSeconds(32000), 1)
 Eq("half a second", RawBytesToSeconds(16000), 0.5)
 Eq("an empty capture is zero seconds", RawBytesToSeconds(0), 0)
+
+; =====================================================================
+Group("Web - the WebView2 runtime")
+
+Yes("a current runtime is usable", IsUsableWebView2("155.0.4283.45"))
+Yes("the minimum itself is usable", IsUsableWebView2(WebView2MinRuntime()))
+No("an old runtime is not", IsUsableWebView2("92.0.902.84"))
+No("what an uninstall leaves behind is not a runtime", IsUsableWebView2("0.0.0.0"))
+No("no value is no runtime", IsUsableWebView2(""))
+No("a damaged value is no runtime", IsUsableWebView2("155.0"))
+Yes("whitespace around the value is ignored", IsUsableWebView2(" 155.0.4283.45 "))
+Eq("the per-machine runtime when only it exists", BestWebView2("", "155.0.4283.45"), "155.0.4283.45")
+Eq("the newer of the two", BestWebView2("156.0.1.2", "155.0.4283.45"), "156.0.1.2")
+Eq("an uninstalled per-user runtime does not hide the machine's", BestWebView2("0.0.0.0", "155.0.4283.45"), "155.0.4283.45")
+Eq("none at all", BestWebView2("", "0.0.0.0"), "")
+
+Group("Web - theme and accent")
+
+Yes("dark is dark", ThemeIsDark("dark", 1))
+No("light is light", ThemeIsDark("light", 0))
+Yes("system follows a dark Windows", ThemeIsDark("system", 0))
+No("system follows a light Windows", ThemeIsDark("system", 1))
+No("system without the registry value is light", ThemeIsDark("system", ""))
+; AccentPalette of the default blue, as RegRead returns it.
+pal := "99EBFF004CC2FF000091F8000078D4000067C000003E9200001A6800F7630C00"
+Eq("the dark theme gets the light accent shade", AccentFromPalette(pal, true), "#4CC2FF")
+Eq("the light theme gets the dark accent shade", AccentFromPalette(pal, false), "#0067C0")
+Eq("a damaged palette falls back to Windows blue (dark)", AccentFromPalette("00FF", true), "#4CC2FF")
+Eq("a damaged palette falls back to Windows blue (light)", AccentFromPalette("", false), "#005FB8")
+Eq("lower-case hex is upper-cased", AccentFromPalette(StrLower(pal), true), "#4CC2FF")
+Eq("text on the accent is black in the dark theme", OnAccentColor(true), "#000000")
+Yes("Mica from Windows 11 22H2", SupportsMica("10.0.22621"))
+Yes("Mica on this build", SupportsMica("10.0.26200"))
+No("no Mica on Windows 11 21H2", SupportsMica("10.0.22000"))
+No("no Mica on Windows 10", SupportsMica("10.0.19045"))
+Yes("a dark title bar on Windows 10 2004", SupportsDarkTitleBar("10.0.19041"))
+No("not before it", SupportsDarkTitleBar("10.0.18363"))
+
+Eq("a silent microphone shows nothing", LevelFromPeak(0), 0)
+Eq("a quiet room shows nothing", LevelFromPeak(0.002), 0)
+Eq("a loud peak fills the meter", LevelFromPeak(0.9), 1)
+Yes("-28 dBFS sits in the middle", Abs(LevelFromPeak(10 ** (-28 / 20)) - 0.5) < 0.001)
+
+Group("Web - JSON to the pages")
+
+Eq("a string", JsonEncode("a"), '"a"')
+Eq("an integer is a number", JsonEncode(42), "42")
+Eq("an INI value stays a string", JsonEncode("8910"), '"8910"')
+Eq("a float", JsonEncode(0.5), "0.5")
+Eq("quotes and backslashes are escaped", JsonEncode('C:\x "y"'), '"C:\\x \"y\""')
+Eq("line breaks are escaped", JsonEncode("a`r`nb`tc"), '"a\r\nb\tc"')
+Eq("other control characters become \u escapes", JsonEncode("a" Chr(1) "b"), '"a\u0001b"')
+Eq("accented text passes through", JsonEncode("d" Chr(0xE9) "j" Chr(0xE0)), '"d' Chr(0xE9) 'j' Chr(0xE0) '"')
+Eq("an empty map", JsonEncode(Map()), "{}")
+Eq("a map, keys in order", JsonEncode(Map("b", 1, "a", "x")), '{"a":"x","b":1}')
+Eq("an array", JsonEncode([1, "two"]), '[1,"two"]')
+Eq("nesting", JsonEncode(Map("items", [Map("t", "x")])), '{"items":[{"t":"x"}]}')
+Eq("an empty array", JsonEncode([]), "[]")
+
+Group("Web - JSON from the pages")
+
+m := ParseFlatJson('{"op":"set","key":"Port","value":"8910"}')
+Yes("a flat object parses", IsObject(m))
+Eq("its strings", IsObject(m) ? m["key"] "=" m["value"] : "", "Port=8910")
+m := ParseFlatJson('  { "a" : 1 , "b" : -2.5 , "c" : true , "d" : false , "e" : null }  ', &k)
+Eq("an integer", IsObject(m) ? m["a"] : "", 1)
+Eq("a negative decimal", IsObject(m) ? m["b"] : "", -2.5)
+Eq("true is 1", IsObject(m) ? m["c"] : "", 1)
+Eq("and its kind says boolean", IsObject(m) ? k["c"] : "", "bool")
+Eq("false is 0", IsObject(m) ? m["d"] : "", 0)
+Eq("null is empty", IsObject(m) ? m["e"] : "x", "")
+Eq("the number 1 is a number, not a boolean", IsObject(m) ? k["a"] : "", "number")
+m := ParseFlatJson('{"t":"a\"b\\c\/d\n\u00e9\u0041"}')
+Eq("escapes are decoded", IsObject(m) ? m["t"] : "", 'a"b\c/d`n' Chr(0xE9) "A")
+Yes("an empty object", IsObject(ParseFlatJson("{}")))
+m := ParseFlatJson('{"a":1,"A":2}')
+Eq("keys are case-sensitive", IsObject(m) ? m.Count : 0, 2)
+No("a nested object is refused", ParseFlatJson('{"a":{"b":1}}'))
+No("an array is refused", ParseFlatJson('{"a":[1]}'))
+No("a duplicate key is refused", ParseFlatJson('{"a":1,"a":2}'))
+No("trailing text is refused", ParseFlatJson('{"a":1} x'))
+No("a trailing comma is refused", ParseFlatJson('{"a":1,}'))
+No("an unquoted key is refused", ParseFlatJson('{a:1}'))
+No("a single-quoted string is refused", ParseFlatJson("{'a':1}"))
+No("a raw line break in a string is refused", ParseFlatJson('{"a":"x`ny"}'))
+No("an unknown escape is refused", ParseFlatJson('{"a":"\x"}'))
+No("a short \u escape is refused", ParseFlatJson('{"a":"\u00"}'))
+No("a leading zero is refused", ParseFlatJson('{"a":01}'))
+No("an exponent is refused", ParseFlatJson('{"a":1e5}'))
+No("an unterminated string is refused", ParseFlatJson('{"a":"x}'))
+No("a bare value is not an object", ParseFlatJson('"op"'))
+No("nothing is not an object", ParseFlatJson(""))
+No("more than 4 KB is refused", ParseFlatJson('{"a":"' StrReplace(Format("{:5000}", ""), " ", "x") '"}'))
+
+Group("Web - messages from the pages")
+
+m := ParseUiMessage('{"op":"set","key":"AutoPaste","value":"1"}')
+Eq("a set message", IsObject(m) ? m["op"] "/" m["key"] "/" m["value"] : "", "set/AutoPaste/1")
+m := ParseUiMessage('{"op":"meter","on":true,"all":false}')
+Eq("booleans become 1 and 0", IsObject(m) ? m["on"] m["all"] : "", "10")
+m := ParseUiMessage('{"op":"copy","index":3}')
+Eq("an integer field", IsObject(m) ? m["index"] : "", 3)
+Yes("an op without fields", IsObject(ParseUiMessage('{"op":"report"}')))
+No("an unknown op is dropped", ParseUiMessage('{"op":"run","cmd":"calc"}'))
+No("a message without op is dropped", ParseUiMessage('{"key":"Port","value":"1"}'))
+No("a missing field is dropped", ParseUiMessage('{"op":"set","key":"Port"}'))
+No("an extra field is dropped", ParseUiMessage('{"op":"report","x":1}'))
+No("a number where a string is due is dropped", ParseUiMessage('{"op":"set","key":"Port","value":8910}'))
+No("a string where a boolean is due is dropped", ParseUiMessage('{"op":"capture","on":"true"}'))
+No("the number 1 is not a boolean", ParseUiMessage('{"op":"capture","on":1}'))
+No("a decimal is not an index", ParseUiMessage('{"op":"copy","index":1.5}'))
+No("op must be a string", ParseUiMessage('{"op":true}'))
+No("op is case-sensitive", ParseUiMessage('{"op":"Report"}'))
+No("an over-long string is dropped", ParseUiMessage('{"op":"hotkey","value":"' StrReplace(Format("{:600}", ""), " ", "x") '"}'))
+No("malformed JSON is dropped", ParseUiMessage('{"op":"report"'))
+bad := ""
+for op, fields in UiMessageSpec()
+    for name, kind in fields
+        if !HasValue(["s", "b", "i"], kind)
+            bad .= op "." name " "
+Eq("every field type is one ParseUiMessage checks", bad, "")
+
+Group("Web - settings from the pages")
+
+Eq("a switch on", UiSettingValue("AutoPaste", "1"), "1")
+Eq("a switch off", UiSettingValue("PlaySounds", "0"), "0")
+Eq("a switch accepts nothing else", UiSettingValue("AutoPaste", "yes"), "")
+Eq("a language", UiSettingValue("Language", "en"), "en")
+Eq("an unknown language is refused", UiSettingValue("Language", "de"), "")
+Eq("a policy", UiSettingValue("VramPolicy", "resident"), "resident")
+Eq("an unknown policy is refused", UiSettingValue("VramPolicy", "always"), "")
+Eq("a theme", UiSettingValue("Theme", "dark"), "dark")
+Eq("a port is clamped, not refused", UiSettingValue("Port", "80"), "1024")
+Eq("a port that is not a number falls back", UiSettingValue("Port", "abc"), "8910")
+Eq("an unload delay from the choices", UiSettingValue("IdleMinutes", "480"), "480")
+Eq("a timeout is clamped", UiSettingValue("LoadTimeout", "5"), "10")
+Eq("a microphone name", UiSettingValue("Mic", "Microphone (Rode NT-USB)"), "Microphone (Rode NT-USB)")
+Eq("a microphone name with a control character is refused", UiSettingValue("Mic", "a`nb"), "")
+Eq("the models directory is not the pages' to set", UiSettingValue("ModelsDir", "C:\x"), "")
+Eq("nor whether setup ran", UiSettingValue("Configured", "1"), "")
+Eq("nor the tier, which has its own op", UiSettingValue("Tier", "max"), "")
+bad := ""
+for key in UiSettableKeys()
+    if !ConfigSpec().Has(key)
+        bad .= key " "
+Eq("every settable key is a ConfigSpec setting", bad, "")
+bad := ""
+for key in UiSettableKeys()
+    if (key != "Mic" && UiSettingValue(key, ConfigSpec()[key][2]) = "")
+        bad .= key " "
+Eq("every settable key accepts its own default", bad, "")
+
+Group("Web - dictation keys")
+
+Yes("F9", IsPlausibleHotkey("F9"))
+Yes("a combination", IsPlausibleHotkey("^+Space"))
+Yes("a right-hand modifier alone", IsPlausibleHotkey("RCtrl"))
+Yes("a mouse side button", IsPlausibleHotkey("XButton1"))
+Yes("a letter with Win", IsPlausibleHotkey("#a"))
+Yes("a punctuation key", IsPlausibleHotkey("^``"))
+No("empty", IsPlausibleHotkey(""))
+No("a custom combination", IsPlausibleHotkey("a & b"))
+No("two words", IsPlausibleHotkey("F9F10 x"))
+No("an option string", IsPlausibleHotkey("F9 Up"))
+No("too long", IsPlausibleHotkey("^" StrReplace(Format("{:40}", ""), " ", "a")))
+
+Group("Web - bug report")
+
+r := BugReport("2.3.0", "max", "large-v3", "RTX 4070 Ti", "10.0.26200", "", ["l1", "l2"])
+Has("names the version", r, "Whispers 2.3.0")
+Has("names the tier and model", r, "Tier: max (large-v3)")
+Has("says when WebView2 is missing", r, "WebView2: not installed")
+Has("ends with the log lines", r, "l1`r`nl2`r`n")
 
 ; =====================================================================
 Group("Net - certutil output")

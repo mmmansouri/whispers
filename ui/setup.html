@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whispers setup</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="setup.css">
+<script src="bridge.js"></script>
+<script src="setup.js" defer></script>
+</head>
+<body data-page="setup">
+<div class="shell">
+  <div class="glow" aria-hidden="true"></div>
+  <aside class="rail">
+    <div class="brand">
+      <div class="logo" style="width:40px;height:40px;border-radius:11px">
+        <svg aria-hidden="true" width="22" height="22" viewBox="0 0 24 24" stroke-width="2.5"><path d="M5 10v4"/><path d="M9.5 7v10"/><path d="M14.5 5v14"/><path d="M19 9v6"/></svg>
+      </div>
+      <div class="display" style="font-size:18px;font-weight:600">Whispers</div>
+    </div>
+    <ol class="steps" id="steps" aria-label="Setup steps"></ol>
+    <div class="grow"></div>
+    <div class="muted" id="rail-note" style="line-height:1.5"></div>
+  </aside>
+  <div class="main">
+    <main class="page" id="page" tabindex="-1"></main>
+    <footer class="footer">
+      <span class="muted grow" id="progress"></span>
+      <button class="btn big" id="back" data-act="back">Back</button>
+      <button class="btn big primary" id="next" data-act="next">Next</button>
+    </footer>
+  </div>
+</div>
+</body>
+</html>

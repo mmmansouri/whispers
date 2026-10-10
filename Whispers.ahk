@@ -12,6 +12,13 @@
 #Include %A_LineFile%\..\lib\Install.ahk
 #Include %A_LineFile%\..\lib\Indicator.ahk
 #Include %A_LineFile%\..\lib\Tray.ahk
+#Include %A_LineFile%\..\lib\Web.ahk
+
+; The WebView2 binding the settings window and the setup are hosted with
+; (ADR-0001), pinned in versions.json and fetched into vendor\ by
+; tools\fetch-vendor.ps1. *i: a checkout without it still starts, and
+; falls back to the native windows.
+#Include *i %A_LineFile%\..\vendor\ahk2_lib\WebView2\WebView2.ahk
 
 ; =====================================================================
 ; Whispers - push-to-talk dictation powered by whisper.cpp
@@ -139,6 +146,18 @@ gWizard      := ""
 gWizCtl      := ""
 gWizEcho     := false
 gFirstRun    := false
+; Web pages (see their section).
+UI_HOST      := "whispers.example"  ; where ui\ is served inside WebView2
+gWeb         := Map()   ; page name -> its window, see WebOpen
+gWebEnv      := ""      ; the WebView2 environment, while a page is open
+gWebFailed   := ""      ; why WebView2 could not be used, once it failed
+gWebMics     := ""      ; the device list the pages were last sent
+gWebCapture  := false   ; a page is recording a new dictation key
+gMeters      := Map()   ; dshow device -> its open WASAPI meter
+gMeterWant   := Map()   ; page -> which levels it wants, see MeterOp
+gDlSink      := ""      ; the page showing the running download, if any
+gUpdateState := ""      ; "", "current", "available" or "failed"
+gUpdateAt    := ""      ; when the update check last answered, HH:mm
 
 ; === Bootstrap ===
 try DirCreate(DATA_DIR)
@@ -177,6 +196,9 @@ InitMenuTheme()
 ; are never older than the click; and it follows a light/dark switch.
 OnMessage(0x404, OnTrayNotify)
 OnMessage(0x1A, OnSettingChange)
+OnMessage(0x320, OnColorizationChange)     ; WM_DWMCOLORIZATIONCOLORCHANGED
+OnMessage(0x3, WebOnMove)                  ; WM_MOVE
+OnMessage(0x6, WebOnActivate)              ; WM_ACTIVATE
 BuildTray()
 SetTimer(CheckIdle, 30000)
 
@@ -355,6 +377,7 @@ LogMsg(level, msg) {
         gLogBuf.RemoveAt(1)
     try FileAppend(line "`r`n", APP_LOG, "UTF-8")
     RefreshLogView()
+    WebSend("settings", Map("ev", "logline", "line", line))
 }
 
 ; Reads the tail of a log file, for surfacing a real error message.
@@ -918,6 +941,8 @@ DeliverText(text) {
     ; dictating into whatever window happens to be behind it.
     if (gWizEcho) {
         try gWizCtl["Heard"].Value := text
+        WebSend("setup", Map("ev", "heard", "text", text))
+        WebRec("done", "Heard you", done)
         AddHistory(text)
         PlayCue("done")
         IndDone("Heard you", done)
@@ -1044,8 +1069,14 @@ FetchVerified(url, destPath, expectedSha, label, approxBytes := 0) {
     return FileExist(destPath) ? true : false
 }
 
+; While a page has asked for the download (gDlSink), its progress is
+; sent there instead of to a window of its own.
 DlWindow(label) {
-    global APP_NAME
+    global APP_NAME, gDlSink
+    if (gDlSink != "") {
+        WebSend(gDlSink, Map("ev", "download", "phase", "start", "label", label, "got", 0, "total", 0))
+        return Map("page", gDlSink, "label", label)
+    }
     g := Gui("+AlwaysOnTop -MinimizeBox -MaximizeBox", APP_NAME " - downloading")
     g.SetFont("s9", "Segoe UI")
     g.Add("Text", "xm w430", label)
@@ -1063,10 +1094,14 @@ CancelDownload() {
 }
 
 DlSay(ui, msg) {
+    if ui.Has("page")
+        return WebSend(ui["page"], Map("ev", "download", "phase", "info", "label", msg, "got", 0, "total", 0))
     try ui["info"].Value := msg
 }
 
 DlProgress(ui, got, total) {
+    if ui.Has("page")
+        return WebSend(ui["page"], Map("ev", "download", "phase", "progress", "label", ui["label"], "got", got, "total", total))
     mb := Round(got / 1048576)
     if (total > 0) {
         pos := Round(got / total * 1000)
@@ -1078,7 +1113,8 @@ DlProgress(ui, got, total) {
 }
 
 DlClose(ui) {
-    try ui["gui"].Destroy()
+    if ui.Has("gui")
+        try ui["gui"].Destroy()
 }
 
 ; True when the tier's model is on disk, fetching it first if the user
@@ -1165,10 +1201,12 @@ UpdateInstalledSize() {
 ; intact; it does not prove who built it. README.md says so in the same
 ; words.
 ; =====================================================================
-CheckForUpdate(*) {
-    global Cfg, TEMP_DIR, CURL_EXE, APP_VERSION, gUpdate
+; force: asked for from the About page, so it runs even when the check
+; at startup is turned off.
+CheckForUpdate(force := false, *) {
+    global Cfg, TEMP_DIR, CURL_EXE, APP_VERSION, gUpdate, gUpdateState, gUpdateAt
 
-    if (!Cfg["CheckUpdates"]) {
+    if (!Cfg["CheckUpdates"] && force != true) {
         LogMsg("INFO", "Update check skipped: turned off in settings")
         return
     }
@@ -1184,8 +1222,10 @@ CheckForUpdate(*) {
     RunWait(ShellCmd(CmdFetchJson(CURL_EXE, api, dest, dlog)), TEMP_DIR, "Hide")
     if !FileExist(dest) {
         LogMsg("INFO", "Update check: no answer from " api)
+        gUpdateState := "failed"
         return
     }
+    gUpdateAt := FormatTime(A_Now, "HH:mm")
 
     json := ""
     try json := FileRead(dest, "UTF-8")
@@ -1197,6 +1237,7 @@ CheckForUpdate(*) {
     tag := ReleaseTagFrom(json)
     if !IsNewerVersion(APP_VERSION, tag) {
         LogMsg("INFO", "Up to date (" APP_VERSION ", latest published is " tag ")")
+        gUpdateState := "current"
         return
     }
 
@@ -1209,6 +1250,7 @@ CheckForUpdate(*) {
     gUpdate := Map("tag", NormalizeVersion(tag), "url", asset["url"],
                    "sha256", asset["sha256"], "name", asset["name"])
     LogMsg("INFO", "Update available: " tag " (" asset["name"] ")")
+    gUpdateState := "available"
     BuildTray()
     Notify("Whispers " NormalizeVersion(tag) " is ready to install", "Right-click the tray icon and choose Update.")
 }
@@ -1241,6 +1283,7 @@ InstallUpdate(*) {
 Fail(msg, detail) {
     global Cfg
     LogMsg("ERROR", msg (detail != "" ? " | " detail : ""))
+    WebRec("error", msg, ErrorSubline(detail))
     IndError(msg, detail)
     PlayCue("error")
     ; The pill shows it where the user is looking; the full detail is in
@@ -1253,6 +1296,7 @@ Fail(msg, detail) {
 Warn(msg) {
     global Cfg
     LogMsg("WARN", msg)
+    WebRec("error", msg)
     IndWarn(msg)
     if !Cfg["ShowIndicator"]
         Notify(msg)
@@ -1772,8 +1816,11 @@ GpMeasure(str, font) {
 ; =====================================================================
 ; Hotkey and state
 ; =====================================================================
-ApplyHotkey(key) {
+; quiet: the caller reports a failure itself (the pages show it inline);
+; err receives the reason.
+ApplyHotkey(key, quiet := false, &err := "") {
     global gCurHotkey, APP_NAME
+    err := ""
     if (gCurHotkey != "") {
         try Hotkey(gCurHotkey, "Off")
         try Hotkey(gCurHotkey " Up", "Off")
@@ -1784,7 +1831,12 @@ ApplyHotkey(key) {
         gCurHotkey := key
         return true
     } catch as e {
-        MsgBox("Cannot register hotkey '" key "'.`n`n" e.Message, APP_NAME, "Icon!")
+        err := e.Message
+        ; Half-registered: the down key may be on without its Up.
+        try Hotkey(key, "Off")
+        try Hotkey(key " Up", "Off")
+        if !quiet
+            MsgBox("Cannot register hotkey '" key "'.`n`n" e.Message, APP_NAME, "Icon!")
         if (gCurHotkey != "") {
             try Hotkey(gCurHotkey, HkDown, "On")
             try Hotkey(gCurHotkey " Up", HkUp, "On")
@@ -1814,6 +1866,8 @@ gPausedState() {
 ; Tray icon + tooltip reflect the current state at a glance.
 SetState(state) {
     global gCurHotkey, APP_NAME, ROOT_DIR, gTrayState
+    if (state != gTrayState && (state = "rec" || state = "work"))
+        WebRec(state)
     gTrayState := state
     try TraySetIcon(ROOT_DIR "\assets\tray\" TrayIconName(state) ".ico")
     A_IconTip := APP_NAME " - " TrayHeader(state, gCurHotkey)
@@ -1960,8 +2014,16 @@ OnTrayNotify(wParam, lParam, msg, hwnd) {
 
 OnSettingChange(wParam, lParam, msg, hwnd) {
     global gMenuFlush
-    if (gMenuFlush && lParam && StrGet(lParam) = "ImmersiveColorSet")
-        DllCall(gMenuFlush)
+    if (lParam && StrGet(lParam) = "ImmersiveColorSet") {
+        if gMenuFlush
+            DllCall(gMenuFlush)
+        WebThemeChanged()
+    }
+}
+
+; The accent colour changed.
+OnColorizationChange(wParam, lParam, msg, hwnd) {
+    WebThemeChanged()
 }
 
 ToggleServer(*) {
@@ -1999,8 +2061,19 @@ AddHistory(text) {
 
 ; =====================================================================
 ; Settings window
+;
+; The page in ui\ when WebView2 can be used (see "Web pages"), else the
+; native window below - the window of 2.2, kept as the fallback.
 ; =====================================================================
 ShowSettings(startTab := 1) {
+    why := WebUnavailable()
+    if (why = "")
+        return WebOpen("settings", ["general", "engine", "history", "log"][startTab])
+    LogMsg("INFO", "Settings in the native window: " why)
+    ShowSettingsNative(startTab)
+}
+
+ShowSettingsNative(startTab := 1) {
     global gSettingsGui, gCtl, gHistView, gLogView, Cfg, APP_NAME, APP_VERSION
 
     if (gSettingsGui) {
@@ -2324,8 +2397,19 @@ SaveLabelReset() {
 ; While it is open, transcriptions are echoed into it and pasted
 ; nowhere: someone testing their microphone has some other window behind
 ; this one, and it is not a place to drop text.
+;
+; As for the settings, the page in ui\ is used when it can be, and the
+; single native window below otherwise.
 ; =====================================================================
 ShowFirstRun() {
+    why := WebUnavailable()
+    if (why = "")
+        return WebOpen("setup")
+    LogMsg("INFO", "Setup in the native window: " why)
+    ShowFirstRunNative()
+}
+
+ShowFirstRunNative() {
     global gWizard, gWizCtl, gWizEcho, Cfg, APP_NAME, APP_VERSION
 
     if (gWizard) {
@@ -2463,15 +2547,9 @@ WizFinish(btn, *) {
         ApplyHotkey(key)
     Cfg["Hotkey"] := gCurHotkey
 
-    Cfg["Configured"] := 1
-    SaveConfig()
-    LogMsg("INFO", "Setup finished: mic=" Cfg["Mic"] " hotkey=" Cfg["Hotkey"] " lang=" Cfg["Language"])
-
     gWizEcho := false
     try gWizard.Hide()
-    BuildTray()
-    SetState(gPausedState())
-    Notify("Setup done", "Hold " gCurHotkey " to dictate in any app.")
+    WizDone()
 }
 
 GetModelClick(btn, *) {
@@ -2480,6 +2558,824 @@ GetModelClick(btn, *) {
     EnsureModelInstalled(SelectedTier(), true)
     UpdateInstalledSize()
     RefreshStatus()
+}
+
+; =====================================================================
+; Web pages: the settings window and the first-run setup (ADR-0001)
+;
+; Each is a native window hosting a WebView2 control, which shows a page
+; from ui\ mapped to https://whispers.example/ - loaded from disk, never
+; from the network, and nothing else may be navigated to. The page asks
+; for everything through messages (listed in lib\Web.ahk) and this side
+; answers: settings are read and written here, through ConfigSpec(),
+; never by the page.
+;
+; WebView2 is created the first time a page opens, never at startup, so
+; the dictation path never waits on it, and released when the last page
+; closes: its processes hold some 100 MB a tray app has no use for.
+; When it cannot be used - runtime missing, binding not fetched,
+; NativeWindows=1, or a creation that fails - the native windows of 2.2
+; open instead, and the log says why.
+; =====================================================================
+WebRuntimeVersion() {
+    static key := "\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    user := "", machine := ""
+    try user := RegRead("HKCU\Software" key, "pv")
+    try machine := RegRead("HKLM\SOFTWARE\WOW6432Node" key, "pv")
+    if (machine = "")
+        try machine := RegRead("HKLM\SOFTWARE" key, "pv")
+    return BestWebView2(user, machine)
+}
+
+; The binding is included with *i, so a checkout that has not run
+; tools\fetch-vendor.ps1 still starts; it then has no class WebView2,
+; and only a dynamic reference can ask about it without a load error.
+WebBinding() {
+    try return %"WebView2"%
+    return ""
+}
+
+; "" when the pages can be used, otherwise why not.
+WebUnavailable() {
+    global Cfg, gWebFailed
+    if (Cfg["NativeWindows"] = "1")
+        return "NativeWindows=1 in the INI"
+    if (gWebFailed != "")
+        return gWebFailed
+    if !IsObject(WebBinding())
+        return "the WebView2 binding is not in vendor\ (run tools\fetch-vendor.ps1)"
+    if (WebRuntimeVersion() = "")
+        return "the WebView2 runtime is not installed, or older than " WebView2MinRuntime()
+    return ""
+}
+
+WebIsDark() {
+    global Cfg
+    light := ""
+    try light := RegRead("HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme")
+    return ThemeIsDark(Cfg["Theme"], light)
+}
+
+WebTheme() {
+    global Cfg
+    dark := WebIsDark()
+    palette := ""
+    try palette := RegRead("HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent", "AccentPalette")
+    return Map("ev", "theme", "theme", Cfg["Theme"], "dark", dark ? 1 : 0,
+               "accent", AccentFromPalette(palette, dark), "onAccent", OnAccentColor(dark),
+               "mica", SupportsMica(A_OSVersion) ? 1 : 0)
+}
+
+; Opens a page, or brings it back. sub is the settings section to show.
+WebOpen(name, sub := "") {
+    global gWeb, gWizEcho, APP_NAME
+    if (name = "setup")
+        gWizEcho := true
+    if gWeb.Has(name) {
+        w := gWeb[name]
+        try w.gui.Show()
+        if (sub != "")
+            WebSend(name, Map("ev", "nav", "page", sub))
+        return
+    }
+    g := Gui("+Resize +MinSize760x540", name = "setup" ? APP_NAME " setup" : APP_NAME " Settings")
+    w := {gui: g, name: name, ctl: 0, wv: 0, ready: false, sub: sub, t0: A_TickCount}
+    gWeb[name] := w
+    WebFrame(w)
+    WebIcon(g.Hwnd)
+    g.OnEvent("Size", WebOnSize.Bind(name))
+    g.OnEvent("Close", WebOnClose.Bind(name))
+    g.Show(name = "setup" ? "w1000 h680" : "w1100 h740")
+    WebCreate(w)
+}
+
+; Title bar and backdrop. With Mica the window is see-through where the
+; page is, so the page and the window behind it both stay transparent;
+; without it, both get the theme's background so nothing flashes white.
+WebFrame(w) {
+    dark := WebIsDark()
+    hwnd := w.gui.Hwnd
+    if SupportsDarkTitleBar(A_OSVersion)
+        DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", hwnd, "Int", 20, "Int*", dark ? 1 : 0, "Int", 4)
+    if SupportsMica(A_OSVersion) {
+        w.gui.BackColor := "000000"
+        DllCall("dwmapi\DwmSetWindowAttribute", "Ptr", hwnd, "Int", 38, "Int*", 2, "Int", 4)
+        margins := Buffer(16, 0)
+        NumPut("Int", -1, "Int", -1, "Int", -1, "Int", -1, margins)
+        DllCall("dwmapi\DwmExtendFrameIntoClientArea", "Ptr", hwnd, "Ptr", margins)
+    } else {
+        w.gui.BackColor := dark ? "202020" : "F3F3F3"
+    }
+    if w.ctl
+        try w.ctl.DefaultBackgroundColor := WebBackground(dark)
+}
+
+; COREWEBVIEW2_COLOR packed as the binding passes it: A, R, G, B bytes.
+WebBackground(dark) {
+    if SupportsMica(A_OSVersion)
+        return 0
+    v := dark ? 0x20 : 0xF3
+    return 0xFF | (v << 8) | (v << 16) | (v << 24)
+}
+
+WebIcon(hwnd) {
+    global ROOT_DIR
+    ico := ROOT_DIR "\assets\Whispers.ico"
+    try {
+        small := LoadPicture(ico, "Icon1 w" DllCall("GetSystemMetrics", "Int", 49) " h" DllCall("GetSystemMetrics", "Int", 50), &t1)
+        big := LoadPicture(ico, "Icon1 w" DllCall("GetSystemMetrics", "Int", 11) " h" DllCall("GetSystemMetrics", "Int", 12), &t2)
+        SendMessage(0x80, 0, small, hwnd)      ; WM_SETICON ICON_SMALL
+        SendMessage(0x80, 1, big, hwnd)        ; ICON_BIG
+    }
+}
+
+WebCreate(w) {
+    global gWebEnv, TEMP_DIR, ROOT_DIR
+    ; Fifteen seconds is far beyond the 300 ms measured here; a runtime
+    ; that never answers would otherwise leave an empty window for good.
+    SetTimer(WebCreateTimeout.Bind(w), -15000)
+    try {
+        if IsObject(gWebEnv) {
+            p := gWebEnv.CreateCoreWebView2ControllerAsync(w.gui.Hwnd)
+        } else {
+            ; The browser's profile goes to the scratch directory: nothing
+            ; in it is worth keeping, and the uninstaller removes it.
+            udf := TEMP_DIR "\WebView2"
+            try DirCreate(udf)
+            loader := ROOT_DIR "\vendor\ahk2_lib\WebView2\64bit\WebView2Loader.dll"
+            p := WebBinding().CreateEnvironmentAsync(0, udf, "", loader).then(WebEnvReady.Bind(w))
+        }
+        p.then(WebControllerReady.Bind(w), WebCreateFailed.Bind(w))
+    } catch as e {
+        WebCreateFailed(w, e)
+    }
+}
+
+WebEnvReady(w, env) {
+    global gWebEnv
+    gWebEnv := env
+    return env.CreateCoreWebView2ControllerAsync(w.gui.Hwnd)
+}
+
+WebControllerReady(w, ctl) {
+    global gWeb, UI_HOST, ROOT_DIR
+    ; Closed while WebView2 was starting.
+    if !gWeb.Has(w.name) || gWeb[w.name] !== w {
+        try ctl.Close()
+        return
+    }
+    try {
+        w.ctl := ctl
+        ctl.DefaultBackgroundColor := WebBackground(WebIsDark())
+        wv := ctl.CoreWebView2
+        w.wv := wv
+        s := wv.Settings
+        ; A development checkout keeps the developer tools (F12); an
+        ; installation behaves like an application, not like a browser.
+        dev := DirExist(ROOT_DIR "\.git") ? 1 : 0
+        s.AreDevToolsEnabled := dev
+        s.AreBrowserAcceleratorKeysEnabled := dev
+        s.AreDefaultContextMenusEnabled := dev
+        s.IsStatusBarEnabled := false
+        s.IsZoomControlEnabled := false
+        s.AreHostObjectsAllowed := false
+        wv.SetVirtualHostNameToFolderMapping(UI_HOST, ROOT_DIR "\ui", 0)     ; DENY cross-origin
+        wv.add_WebMessageReceived(WebOnMessage.Bind(w.name))
+        wv.add_NavigationStarting(WebOnNavigate)
+        wv.add_NewWindowRequested(WebOnNewWindow)
+        wv.add_ProcessFailed(WebOnProcessFailed.Bind(w.name))
+        wv.Navigate("https://" UI_HOST "/" w.name ".html")
+        WebFocus(w)
+        LogMsg("INFO", "Page " w.name " created in " (A_TickCount - w.t0) " ms")
+    } catch as e {
+        WebCreateFailed(w, e)
+    }
+}
+
+WebCreateFailed(w, err) {
+    msg := IsObject(err) ? err.Message : String(err)
+    WebGiveUp(w, "WebView2 could not start: " msg)
+}
+
+WebCreateTimeout(w) {
+    if !w.ctl
+        WebGiveUp(w, "WebView2 did not start within 15 s")
+}
+
+; From here on this session uses the native windows; the next start
+; tries again, since a runtime being updated is the usual cause.
+WebGiveUp(w, why) {
+    global gWeb, gWebFailed
+    if !gWeb.Has(w.name) || gWeb[w.name] !== w
+        return
+    gWebFailed := why
+    LogMsg("ERROR", why " - using the native windows")
+    gWeb.Delete(w.name)
+    try w.gui.Destroy()
+    if (w.name = "setup")
+        ShowFirstRunNative()
+    else
+        ShowSettingsNative(WebTabIndex(w.sub))
+}
+
+WebTabIndex(sub) {
+    for i, s in ["general", "engine", "history", "log"]
+        if (s = sub)
+            return i
+    return 1
+}
+
+WebOnSize(name, g, minMax, width, height) {
+    global gWeb
+    if (minMax = -1 || !gWeb.Has(name))
+        return
+    try gWeb[name].ctl.Fill()
+}
+
+; WebView2 places its own pop-ups (a select's list) from where it
+; believes the window is, so it is told when the window moves.
+WebOnMove(wParam, lParam, msg, hwnd) {
+    global gWeb
+    for name, w in gWeb
+        if (w.gui.Hwnd = hwnd && w.ctl)
+            try w.ctl.NotifyParentWindowPositionChanged()
+}
+
+; Keyboard focus goes to the page whenever its window is activated.
+; Left on the host window, keys reached the window instead: F10 or Alt
+; put it in menu mode, a modal loop in which AutoHotkey starts no thread
+; - no timer, no message from the page, and no dictation either.
+WebOnActivate(wParam, lParam, msg, hwnd) {
+    global gWeb
+    if !(wParam & 0xFFFF)
+        return
+    for name, w in gWeb
+        if (w.gui.Hwnd = hwnd && w.ctl)
+            SetTimer(WebFocus.Bind(w), -1)
+}
+
+WebFocus(w) {
+    try w.ctl.MoveFocus(0)      ; COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC
+}
+
+WebOnClose(name, *) {
+    global gWeb, gWebEnv, gWizEcho
+    if !gWeb.Has(name)
+        return
+    w := gWeb[name]
+    gWeb.Delete(name)
+    MeterOp(name, 0, 0)
+    WebCapture(0)
+    if (name = "setup") {
+        gWizEcho := false
+        WizDone()
+    }
+    try w.ctl.Close()
+    try w.gui.Destroy()
+    if (gWeb.Count = 0)
+        gWebEnv := ""
+}
+
+; Only our own pages, and https links (the release notes) go to the
+; default browser instead of inside the window.
+WebOnNavigate(sender, args) {
+    global UI_HOST
+    uri := args.Uri
+    if (InStr(uri, "https://" UI_HOST "/") = 1)
+        return
+    args.Cancel := true
+    if RegExMatch(uri, "^https://[^\s]+$")
+        try Run(uri)
+    LogMsg("INFO", "Page navigation kept out of the window: " SubStr(uri, 1, 120))
+}
+
+; A crashed renderer leaves a blank page; reloading it asks for its state
+; again. If the browser itself is gone the reload fails, and closing the
+; window and opening it again starts a new one.
+WebOnProcessFailed(name, sender, args) {
+    kind := ""
+    try kind := args.ProcessFailedKind
+    LogMsg("WARN", "WebView2 process failed under page " name " (kind " kind ") - reloading it")
+    SetTimer(WebReload.Bind(name), -1)
+}
+
+WebReload(name) {
+    global gWeb
+    if gWeb.Has(name)
+        try gWeb[name].wv.Reload()
+}
+
+WebOnNewWindow(sender, args) {
+    args.Handled := true
+    uri := args.Uri
+    if RegExMatch(uri, "^https://[^\s]+$")
+        try Run(uri)
+}
+
+WebSend(name, msg) {
+    global gWeb
+    if !gWeb.Has(name)
+        return
+    w := gWeb[name]
+    if !w.wv
+        return
+    try w.wv.PostWebMessageAsJson(JsonEncode(msg))
+}
+
+WebBroadcast(msg) {
+    global gWeb
+    for name in gWeb
+        WebSend(name, msg)
+}
+
+; Runs inside WebView2's callback: whatever the message asks for is done
+; on a thread of its own, since some of it (a download, a model load)
+; takes minutes, and the browser must not wait on it.
+WebOnMessage(name, sender, args) {
+    global UI_HOST
+    if (InStr(args.Source, "https://" UI_HOST "/") != 1)
+        return
+    json := args.WebMessageAsJson
+    msg := ParseUiMessage(json)
+    if !IsObject(msg) {
+        LogMsg("WARN", "Page " name " sent a message that is not one of ours - dropped: " SubStr(json, 1, 200))
+        return
+    }
+    SetTimer(WebHandle.Bind(name, msg), -1)
+}
+
+WebHandle(name, msg) {
+    global gWeb, Cfg, gHistory, gDlCancel, LOG_DIR
+    switch msg["op"] {
+        case "hello":
+            if gWeb.Has(name)
+                gWeb[name].ready := true
+            WebSend(name, WebState(name))
+            if (gWeb.Has(name) && gWeb[name].sub != "")
+                WebSend(name, Map("ev", "nav", "page", gWeb[name].sub))
+        case "set":
+            WebSet(name, msg["key"], msg["value"])
+        case "hotkey":
+            WebHotkey(name, msg["value"])
+        case "capture":
+            WebCapture(msg["on"])
+        case "meter":
+            MeterOp(name, msg["on"], msg["all"])
+        case "detectMic":
+            WebSend(name, Map("ev", "notice", "text", "Listening to every microphone..."))
+            picked := AutoDetectMic()
+            if (picked != "") {
+                WebSet(name, "Mic", picked)
+                WebSend(name, Map("ev", "notice", "text", "Selected: " picked))
+            } else {
+                WebSend(name, Map("ev", "notice", "text", "No usable microphone found"))
+            }
+        case "tier":
+            WebTier(name, msg["value"])
+        case "getModel":
+            WebGetModel(name, Cfg["Tier"])
+        case "cancelDownload":
+            gDlCancel := true
+        case "server":
+            if msg["on"] {
+                ok := EnsureServerReady()
+                IndHide()
+                if !ok
+                    WebSend(name, Map("ev", "notice", "text", "The model could not be loaded - see Diagnostics"))
+            } else {
+                StopServer("user request")
+            }
+            BuildTray()
+            WebSend(name, WebStatus(true))
+        case "refresh":
+            WebSend(name, WebStatus(true))
+            WebSend(name, WebHistory())
+            WebSend(name, WebLog())
+        case "copy":
+            i := msg["index"]
+            if (i >= 1 && i <= gHistory.Length) {
+                A_Clipboard := gHistory[i]["text"]
+                WebSend(name, Map("ev", "notice", "text", "Copied to the clipboard"))
+            }
+        case "report":
+            A_Clipboard := WebBugReport()
+            WebSend(name, Map("ev", "notice", "text", "Copied - paste it into a GitHub issue"))
+        case "openLogs":
+            try Run(LOG_DIR)
+        case "checkUpdate":
+            CheckForUpdate(true)
+            WebSend(name, WebApp())
+        case "installUpdate":
+            WebDownloading(name, InstallUpdate)
+        case "autostart":
+            SetAutostart(msg["value"])
+            WebSend(name, Map("ev", "config", "key", "Autostart", "value", IsAutostart()))
+        case "talk":
+            if msg["down"]
+                HkDown()
+            else
+                HkUp()
+        case "finish", "close":
+            WebOnClose(name)
+    }
+}
+
+; One setting from a page: checked like an INI value, applied at once,
+; written at once, and echoed back as kept - a clamped port shows as
+; the port Whispers will really use.
+WebSet(name, key, value) {
+    global Cfg, INI_FILE, gWebMics
+    if !HasValue(UiSettableKeys(), key) {
+        LogMsg("WARN", "Page " name " tried to set " key " - not a setting the pages may change")
+        return
+    }
+    v := UiSettingValue(key, value)
+    if (key = "Mic" && v != "" && IsObject(gWebMics) && !HasValue(gWebMics, v))
+        v := ""
+    if (v = "") {
+        WebSend(name, Map("ev", "config", "key", key, "value", Cfg[key]))
+        return
+    }
+    old := Cfg[key]
+    Cfg[key] := v
+    IniWrite(v, INI_FILE, ConfigSpec()[key][1], key)
+    if (old != v)
+        LogMsg("INFO", "Setting " key " = " v " (was " old ")")
+    WebBroadcast(Map("ev", "config", "key", key, "value", v))
+
+    switch key {
+        case "Port":
+            if (old != v && ProcessExist("whisper-server.exe"))
+                StopServer("port changed")
+        case "VramPolicy":
+            if (v = "resident")
+                StartServer("policy set to resident")
+            else if (v = "never" && ProcessExist("whisper-server.exe"))
+                StopServer("policy set to never")
+        case "Theme":
+            WebThemeChanged()
+        case "Mic":
+            MeterSync()
+    }
+    if (key = "VramPolicy" || key = "Port")
+        WebBroadcast(WebStatus(false))
+    BuildTray()
+}
+
+WebHotkey(name, key) {
+    global Cfg, INI_FILE, gCurHotkey
+    err := ""
+    if !IsPlausibleHotkey(key)
+        err := "That key cannot be used for dictation."
+    else if (key != gCurHotkey && !ApplyHotkey(key, true, &err))
+        err := err = "" ? "Windows would not register that key." : err
+    if (err = "") {
+        Cfg["Hotkey"] := gCurHotkey
+        IniWrite(gCurHotkey, INI_FILE, ConfigSpec()["Hotkey"][1], "Hotkey")
+        LogMsg("INFO", "Dictation key set to " gCurHotkey " from page " name)
+        BuildTray()
+        SetState(gPausedState())
+    }
+    WebSend(name, Map("ev", "hotkey", "ok", err = "" ? 1 : 0, "value", gCurHotkey, "error", err))
+    WebBroadcast(Map("ev", "config", "key", "Hotkey", "value", gCurHotkey))
+}
+
+; While a page records a new key, the current one is off, or pressing it
+; again would start a dictation instead of reaching the page.
+WebCapture(on) {
+    global gCurHotkey, gPaused, gWebCapture
+    if (on = gWebCapture)
+        return
+    gWebCapture := on
+    if gPaused
+        return
+    try Hotkey(gCurHotkey, on ? "Off" : "On")
+    try Hotkey(gCurHotkey " Up", on ? "Off" : "On")
+}
+
+; A tier change from the page, which has already asked the user and
+; shown the size. The model is fetched first, with the progress shown in
+; the page; only once it is on disk does the tier change and the
+; previous model go - a declined or failed download changes nothing.
+WebTier(name, tier) {
+    global Cfg, INI_FILE
+    if !IsValidTier(tier) || TierFile(tier) = "" {
+        WebSend(name, Map("ev", "config", "key", "Tier", "value", Cfg["Tier"]))
+        return
+    }
+    if (tier != Cfg["Tier"]) {
+        if !FileExist(ModelPathFor(tier)) && !WebGetModel(name, tier) {
+            WebSend(name, Map("ev", "config", "key", "Tier", "value", Cfg["Tier"]))
+            return
+        }
+        old := Cfg["Tier"]
+        Cfg["Tier"] := tier
+        IniWrite(tier, INI_FILE, ConfigSpec()["Tier"][1], "Tier")
+        LogMsg("INFO", "Tier changed from " old " to " tier)
+        if ProcessExist("whisper-server.exe")
+            StopServer("tier changed")
+        PruneOtherModels()
+        UpdateInstalledSize()
+        if (Cfg["VramPolicy"] = "resident")
+            StartServer("tier changed, resident policy")
+        BuildTray()
+    }
+    WebBroadcast(Map("ev", "config", "key", "Tier", "value", Cfg["Tier"]))
+    WebBroadcast(Map("ev", "tiers", "tiers", WebTiers()))
+    WebBroadcast(WebStatus(false))
+}
+
+WebGetModel(name, tier) {
+    file := TierFile(tier)
+    if (file = "")
+        return false
+    path := ModelPathFor(tier)
+    ok := FileExist(path)
+        ? true
+        : WebDownloading(name, () => FetchVerified(ModelUrl(tier), path, ModelSha(tier), "Model " file, ModelSize(tier)))
+    if ok
+        UpdateInstalledSize()
+    WebBroadcast(Map("ev", "tiers", "tiers", WebTiers()))
+    WebBroadcast(WebStatus(false))
+    return ok
+}
+
+; Runs fn with the download's progress sent to the page instead of a
+; window of its own.
+WebDownloading(name, fn) {
+    global gDlSink
+    gDlSink := name
+    try {
+        ok := fn()
+    } finally {
+        gDlSink := ""
+    }
+    WebSend(name, Map("ev", "download", "phase", ok ? "done" : "failed", "label", "", "got", 0, "total", 0))
+    return ok
+}
+
+WebThemeChanged() {
+    global gWeb
+    for name, w in gWeb
+        WebFrame(w)
+    WebBroadcast(WebTheme())
+}
+
+; --- what the pages show ----------------------------------------------
+
+WebState(name) {
+    global Cfg, gWebMics, gCurHotkey
+    config := Map()
+    for key in ConfigSpec()
+        if (key != "BinDir" && key != "ModelsDir")
+            config[key] := Cfg[key]
+    config["Hotkey"] := gCurHotkey
+    config["Autostart"] := IsAutostart()
+    mics := GetAudioDevices()
+    if (Cfg["Mic"] != "" && !HasValue(mics, Cfg["Mic"]))
+        mics.InsertAt(1, Cfg["Mic"])
+    gWebMics := mics
+    ; Flagged so the setup never calls a cable carrying music the
+    ; microphone that "hears you best".
+    virtual := []
+    for d in mics
+        if IsVirtualDevice(d)
+            virtual.Push(d)
+    return Map("ev", "state", "page", name, "config", config, "mics", mics, "virtualMics", virtual,
+               "tiers", WebTiers(), "recommended", RecommendedTier(),
+               "status", WebStatus(false), "history", WebHistory(), "log", WebLog(),
+               "theme", WebTheme(), "app", WebApp())
+}
+
+WebTiers() {
+    out := []
+    for t in TierList() {
+        file := TierFile(t)
+        if (file = "")
+            continue
+        out.Push(Map("id", t, "model", ModelShortName(file), "bytes", ModelSize(t),
+                     "vram", TierVram(t), "gpu", TierNeedsGpu(t) ? 1 : 0,
+                     "installed", FileExist(ModelPathFor(t)) ? 1 : 0))
+    }
+    return out
+}
+
+; probe: whether to ask the server over HTTP and nvidia-smi again, which
+; costs a few hundred ms - done for an explicit refresh, not on every
+; setting.
+WebStatus(probe) {
+    global Cfg
+    g := GpuInfo(probe)
+    loaded := ProcessExist("whisper-server.exe") ? 1 : 0
+    answering := (probe && loaded) ? (ServerAlive() ? 1 : 0) : loaded
+    return Map("ev", "status", "loaded", loaded, "answering", answering,
+               "policy", Cfg["VramPolicy"], "port", Cfg["Port"], "tier", Cfg["Tier"],
+               "model", ModelShortName(TierFile(Cfg["Tier"])),
+               "modelInstalled", FileExist(ModelPath()) ? 1 : 0,
+               "vram", TierVram(Cfg["Tier"]),
+               "gpu", g["present"] ? g["name"] : "", "cuda", g["cudaMax"],
+               "vramFree", g["vramFree"], "vramTotal", g["vramTotal"])
+}
+
+WebHistory() {
+    global gHistory
+    items := []
+    for h in gHistory
+        items.Push(Map("time", h["time"], "text", h["text"]))
+    return Map("ev", "history", "items", items)
+}
+
+WebLog() {
+    global gLogBuf
+    lines := []
+    start := gLogBuf.Length > 200 ? gLogBuf.Length - 199 : 1
+    loop gLogBuf.Length - start + 1
+        lines.Push(gLogBuf[start + A_Index - 1])
+    return Map("ev", "log", "lines", lines)
+}
+
+WebApp() {
+    global APP_NAME, APP_VERSION, gUpdate, gUpdateState, gUpdateAt
+    return Map("ev", "app", "name", APP_NAME, "version", APP_VERSION,
+               "update", IsObject(gUpdate) ? gUpdate["tag"] : "",
+               "updateState", gUpdateState, "checkedAt", gUpdateAt,
+               "runtime", WebRuntimeVersion())
+}
+
+WebBugReport() {
+    global Cfg, APP_VERSION, gLogBuf
+    g := GpuInfo()
+    gpu := g["present"] ? g["name"] " (" g["vramTotal"] " MiB, CUDA " g["cudaMax"] ")" : "none detected"
+    lines := []
+    start := gLogBuf.Length > 40 ? gLogBuf.Length - 39 : 1
+    loop gLogBuf.Length - start + 1
+        lines.Push(gLogBuf[start + A_Index - 1])
+    return BugReport(APP_VERSION, Cfg["Tier"], ModelShortName(TierFile(Cfg["Tier"])), gpu,
+                     A_OSVersion, WebRuntimeVersion(), lines)
+}
+
+; Sent to the setup page while it is open: the "Try it" step shows the
+; dictation it is running through the real pipeline.
+WebRec(state, title := "", sub := "") {
+    global gWeb
+    if gWeb.Has("setup")
+        WebSend("setup", Map("ev", "rec", "state", state, "title", title, "sub", sub))
+}
+
+; --- microphone level --------------------------------------------------
+;
+; Read from Windows' own peak meter on each capture endpoint (WASAPI),
+; not from a recording: no process, no file, and every device at once,
+; which is what the setup's microphone step shows. A meter only moves
+; while a stream is open on its device, so each one opens a shared
+; capture stream it never reads - Windows shows the microphone as in use
+; for as long as a page asks for the level.
+
+; page -> "one" (the chosen microphone) or "all"
+MeterOp(page, on, all) {
+    global gMeterWant
+    if on
+        gMeterWant[page] := all ? "all" : "one"
+    else if gMeterWant.Has(page)
+        gMeterWant.Delete(page)
+    MeterSync()
+}
+
+; Opens the meters now wanted and closes the others.
+MeterSync() {
+    global gMeterWant, gMeters, gWebMics, Cfg
+    want := []
+    for page, what in gMeterWant {
+        if (what = "all" && IsObject(gWebMics)) {
+            for d in gWebMics
+                if !HasValue(want, d)
+                    want.Push(d)
+        } else if (Cfg["Mic"] != "" && !HasValue(want, Cfg["Mic"])) {
+            want.Push(Cfg["Mic"])
+        }
+    }
+    for dev in [gMeters*]
+        if !HasValue(want, dev)
+            MeterClose(dev)
+    if (want.Length = 0) {
+        SetTimer(MeterTick, 0)
+        return
+    }
+    missing := []
+    for d in want
+        if !gMeters.Has(d)
+            missing.Push(d)
+    if missing.Length
+        MeterOpen(missing)
+    SetTimer(MeterTick, 80)
+}
+
+MeterOpen(devices) {
+    global gMeters
+    static IID_IAudioClient := "{1CB9AD4C-DBFA-4c32-B178-C2F568A703B2}"
+    static IID_IAudioMeterInformation := "{C02216F6-8C67-4B5B-9D00-D008E73E0064}"
+    try {
+        enum := ComObject("{BCDE0395-E52F-467C-8E3D-C4579291692E}", "{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+        ; EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE)
+        ComCall(3, enum, "Int", 1, "UInt", 1, "Ptr*", &coll := 0)
+        ComCall(3, coll, "UInt*", &n := 0)
+        iidClient := Buffer(16), iidMeter := Buffer(16)
+        DllCall("ole32\CLSIDFromString", "WStr", IID_IAudioClient, "Ptr", iidClient)
+        DllCall("ole32\CLSIDFromString", "WStr", IID_IAudioMeterInformation, "Ptr", iidMeter)
+        loop n {
+            ComCall(4, coll, "UInt", A_Index - 1, "Ptr*", &dev := 0)
+            dshow := MatchDevice(EndpointName(dev), devices)
+            if (dshow = "" || gMeters.Has(dshow)) {
+                ObjRelease(dev)
+                continue
+            }
+            client := 0, meter := 0
+            ; CLSCTX_ALL; a shared stream on the mix format, 200 ms buffer.
+            if (ComCall(3, dev, "Ptr", iidClient, "UInt", 23, "Ptr", 0, "Ptr*", &client, "Int") = 0
+                && ComCall(8, client, "Ptr*", &fmt := 0, "Int") = 0) {
+                hr := ComCall(3, client, "Int", 0, "UInt", 0, "Int64", 2000000, "Int64", 0, "Ptr", fmt, "Ptr", 0, "Int")
+                DllCall("ole32\CoTaskMemFree", "Ptr", fmt)
+                if (hr = 0 && ComCall(10, client, "Int") = 0
+                    && ComCall(3, dev, "Ptr", iidMeter, "UInt", 23, "Ptr", 0, "Ptr*", &meter, "Int") = 0) {
+                    gMeters[dshow] := {client: client, meter: meter}
+                    client := 0, meter := 0
+                }
+            }
+            if meter
+                ObjRelease(meter)
+            if client
+                ObjRelease(client)
+            ObjRelease(dev)
+        }
+        ObjRelease(coll)
+    } catch as e {
+        LogMsg("WARN", "Microphone meter unavailable: " e.Message)
+    }
+}
+
+; IMMDevice -> its friendly name, as WindowsDefaultMic reads it.
+EndpointName(dev) {
+    name := ""
+    if (ComCall(4, dev, "Int", 0, "Ptr*", &store := 0, "Int") != 0)
+        return ""
+    key := Buffer(20, 0)
+    DllCall("ole32\CLSIDFromString", "WStr", "{a45c254e-df1c-4efd-8020-67d146a850e0}", "Ptr", key)
+    NumPut("Int", 14, key, 16)
+    pv := Buffer(24, 0)
+    if (ComCall(5, store, "Ptr", key, "Ptr", pv, "Int") = 0 && NumGet(pv, 8, "Ptr"))
+        name := StrGet(NumGet(pv, 8, "Ptr"), "UTF-16")
+    DllCall("ole32\PropVariantClear", "Ptr", pv)
+    ObjRelease(store)
+    return name
+}
+
+MeterClose(dev) {
+    global gMeters
+    if !gMeters.Has(dev)
+        return
+    m := gMeters[dev]
+    gMeters.Delete(dev)
+    try ComCall(11, m.client)          ; IAudioClient::Stop
+    try ObjRelease(m.meter)
+    try ObjRelease(m.client)
+}
+
+MeterTick() {
+    global gMeters, gMeterWant, Cfg
+    if (gMeterWant.Count = 0) {
+        for dev in [gMeters*]
+            MeterClose(dev)
+        SetTimer(MeterTick, 0)
+        return
+    }
+    levels := Map()
+    for dev, m in gMeters {
+        peak := 0.0
+        try ComCall(3, m.meter, "Float*", &peak)   ; GetPeakValue
+        levels[dev] := Round(LevelFromPeak(peak), 3)
+    }
+    for page, what in gMeterWant {
+        if (what = "all") {
+            WebSend(page, Map("ev", "level", "levels", levels))
+        } else {
+            one := Map()
+            if levels.Has(Cfg["Mic"])
+                one[Cfg["Mic"]] := levels[Cfg["Mic"]]
+            WebSend(page, Map("ev", "level", "levels", one))
+        }
+    }
+}
+
+; The setup is over - finished, or its window closed at any step: what
+; was applied stays, and it is not shown again on the next start.
+WizDone() {
+    global Cfg, gCurHotkey
+    Cfg["Configured"] := 1
+    SaveConfig()
+    LogMsg("INFO", "Setup finished: mic=" Cfg["Mic"] " hotkey=" Cfg["Hotkey"] " lang=" Cfg["Language"])
+    BuildTray()
+    SetState(gPausedState())
+    Notify("Setup done", "Hold " gCurHotkey " to dictate in any app.")
 }
 
 ; =====================================================================

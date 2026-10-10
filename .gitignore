@@ -4,6 +4,10 @@
 /models/
 /AutoHotkey64.exe
 
+# Fetched at build time by tools/fetch-vendor.ps1, also pinned in
+# versions.json, and built into the installer.
+/vendor/
+
 # Generated on every build from versions.json, and the .iss refuses
 # to compile without it - so there is nothing to keep in sync here.
 /installer/pins.iss

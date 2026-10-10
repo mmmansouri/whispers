@@ -16,6 +16,9 @@
 ; Mic is deliberately empty: a microphone is a property of the machine,
 ; never of the product, and is resolved on first run.
 ; BinDir and ModelsDir are empty too, meaning "next to the script".
+; NativeWindows=1 keeps the settings window and the setup on the native
+; windows of 2.2 even where WebView2 works: the fallback for a machine
+; without the runtime, forced, so that it is a path that gets used.
 ConfigSpec() {
     return Map(
         "Mic",           ["Audio",  ""],
@@ -35,6 +38,8 @@ ConfigSpec() {
         "PlaySounds",    ["UI",     "1"],
         "ShowIndicator", ["UI",     "1"],
         "CheckUpdates",  ["UI",     "1"],
+        "Theme",         ["UI",     "system"],
+        "NativeWindows", ["UI",     "0"],
         "Configured",    ["UI",     "0"]
     )
 }
@@ -102,6 +107,21 @@ IsValidTier(tier) {
 IsValidPolicy(policy) {
     for p in ["idle", "resident", "never"]
         if (p = policy)
+            return true
+    return false
+}
+
+IsValidLanguage(lang) {
+    for l in ["fr", "en", "auto"]
+        if (l = lang)
+            return true
+    return false
+}
+
+; system follows the light or dark mode of Windows.
+IsValidTheme(theme) {
+    for t in ["system", "light", "dark"]
+        if (t = theme)
             return true
     return false
 }

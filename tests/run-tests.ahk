@@ -532,6 +532,14 @@ No("a non-numeric candidate is not newer", IsNewerVersion("2.0.0", "latest"))
 No("a candidate with a suffix is not newer", IsNewerVersion("2.0.0", "9.9.9-evil"))
 No("an unknown current version accepts nothing", IsNewerVersion("", "9.9.9"))
 
+Group("Net - leftover update installers")
+Yes("a downloaded update installer is recognised", IsUpdateInstallerName("Whispers-2.2.0-setup.exe"))
+Yes("so is a half-downloaded one", IsUpdateInstallerName("Whispers-2.2.0-setup.exe.part"))
+Yes("the case does not matter", IsUpdateInstallerName("whispers-2.10.1-SETUP.EXE"))
+No("the capture is not an installer", IsUpdateInstallerName("capture.wav"))
+No("another program's installer is not ours", IsUpdateInstallerName("Other-1.0-setup.exe"))
+No("a name merely containing ours is not ours", IsUpdateInstallerName("old-Whispers-2.2.0-setup.exe"))
+
 Group("Net - release metadata")
 
 ; Trimmed from a real api.github.com response, keeping the field order

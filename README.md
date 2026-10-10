@@ -257,7 +257,7 @@ installed system-wide and no administrator rights are required.
 
 Three suites, split by what each can actually prove.
 
-**Unit** — `tests/run-tests.ahk`, 397 assertions over the pure core in
+**Unit** — `tests/run-tests.ahk`, 403 assertions over the pure core in
 `lib/`. Including `lib/` executes nothing, so the runner loads it without
 starting a server, arming a hotkey or opening a microphone. It exits with
 the number of failures and writes `tests/results.txt`, and it runs in CI.
@@ -280,7 +280,7 @@ run in CI. It forces auto-paste off for the duration, so a transcription
 can never land in whatever window happens to have focus, and it restores
 your own settings afterwards even when it fails.
 
-**Installer** — `tests/installer.ps1`, 103 assertions in two halves.
+**Installer** — `tests/installer.ps1`, 106 assertions in two halves.
 
 ```
 pwsh -File tests/installer.ps1 -StaticOnly     # sources only, runs in CI

@@ -140,6 +140,15 @@ Name: "{userstartup}\{#AppName}"; Filename: "{app}\AutoHotkey64.exe"; Parameters
 Filename: "{app}\AutoHotkey64.exe"; Parameters: """{app}\Whispers.ahk"""; WorkingDir: "{app}"; \
   Description: "Start {#AppName} now"; Flags: nowait postinstall skipifsilent
 
+[InstallDelete]
+; The engine DLLs nothing loads (see UnusedEngineDll). An upgrade keeps
+; the engine it already has, so they are removed here as well as no
+; longer copied.
+Type: files; Name: "{app}\bin\llama.dll"
+Type: files; Name: "{app}\bin\parakeet.dll"
+Type: files; Name: "{app}\bin\SDL2.dll"
+Type: files; Name: "{app}\bin\nvblas64_12.dll"
+
 [UninstallDelete]
 ; Downloaded or written at install time, so the uninstaller has no
 ; record of them.
@@ -147,6 +156,10 @@ Type: filesandordirs; Name: "{app}\bin"
 Type: filesandordirs; Name: "{app}\models"
 Type: files;          Name: "{app}\AutoHotkey64.exe"
 Type: files;          Name: "{app}\downloads.ini"
+; The application's scratch directory. Besides the installer of the last
+; update, it holds the last dictation's audio and its text - nothing to
+; leave behind on a machine Whispers has been removed from.
+Type: filesandordirs; Name: "{%TEMP}\Whispers"
 
 [Code]
 
@@ -652,9 +665,22 @@ end;
 // product actually loads is copied out of it.
 // ---------------------------------------------------------------------
 
+// Four DLLs of the engine archive are loaded by nothing Whispers runs:
+// measured on the CUDA 12.4 build by listing the modules a transcribing
+// whisper-server holds, then transcribing on GPU and CPU without them.
+// The ggml-cpu-* variants stay (one per processor family, loaded by
+// name at run time) and so does nvrtc (the CUDA runtime may load it).
+function UnusedEngineDll(const Name: String): Boolean;
+begin
+  Result := (CompareText(Name, 'llama.dll') = 0) or
+            (CompareText(Name, 'parakeet.dll') = 0) or
+            (CompareText(Name, 'SDL2.dll') = 0) or
+            (CompareText(Name, 'nvblas64_12.dll') = 0);
+end;
+
 function KeepFromEngine(const Name: String): Boolean;
 begin
-  Result := EndsWithText(Name, '.dll') or
+  Result := (EndsWithText(Name, '.dll') and not UnusedEngineDll(Name)) or
             (CompareText(Name, 'whisper-cli.exe') = 0) or
             (CompareText(Name, 'whisper-server.exe') = 0);
 end;

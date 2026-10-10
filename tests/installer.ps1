@@ -287,6 +287,17 @@ $noImg = @($imgs | Where-Object { -not (Test-Path (Join-Path $root $_)) })
 AssertTrue 'the wizard images, light and dark, and the setup icon are the ones in assets' `
     (($imgs.Count -eq 21) -and ($noImg.Count -eq 0)) "$($imgs.Count) referenced, missing: $($noImg -join '; ')"
 
+# The four engine DLLs nothing loads: not copied on install, removed on
+# upgrade (the engine is kept then), and the same four in both places.
+$unusedDlls = 'llama.dll', 'parakeet.dll', 'SDL2.dll', 'nvblas64_12.dll'
+$notCopied  = @($unusedDlls | Where-Object { $iss -notmatch "CompareText\(Name, '$([regex]::Escape($_))'\) = 0" })
+$notRemoved = @($unusedDlls | Where-Object { $iss -notmatch "Type: files; Name: `"\{app\}\\bin\\$([regex]::Escape($_))`"" })
+AssertTrue 'the engine DLLs nothing loads are neither copied nor kept by an upgrade' `
+    (($notCopied.Count + $notRemoved.Count) -eq 0) "still copied: $($notCopied -join ', '); not removed: $($notRemoved -join ', ')"
+
+AssertTrue 'the uninstall removes the scratch directory with the last dictation' `
+    ($iss -match 'Type: filesandordirs; Name: "\{%TEMP\}\\Whispers"') '%TEMP%\Whispers is left behind'
+
 # Encoding discipline, same rule as every other Windows-only source.
 foreach ($f in @($issFile, $pinsFile, (Join-Path $root 'tools\build-installer.ps1'), (Join-Path $root 'tools\build-icons.ps1'), (Join-Path $root 'tools\build-sounds.ps1'), $PSCommandPath)) {
     $bytes = [System.IO.File]::ReadAllBytes($f)
@@ -406,6 +417,8 @@ try {
         ($unwanted -join ', ')
     $tests = @(Get-ChildItem (Join-Path $target 'bin') -Filter 'test-*.exe' -EA SilentlyContinue).Count
     AssertEq 'no upstream test binaries are installed' 0 $tests
+    $unusedHere = @('llama.dll', 'parakeet.dll', 'SDL2.dll', 'nvblas64_12.dll' | Where-Object { Test-Path (Join-Path $target "bin\$_") })
+    AssertTrue 'none of the engine DLLs nothing loads are installed' ($unusedHere.Count -eq 0) ($unusedHere -join ', ')
 
     Group 'The model'
     $expected = $version.models.tiers.$Tier

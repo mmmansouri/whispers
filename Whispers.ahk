@@ -164,6 +164,7 @@ LoadConfig()
 gFirstRun := (!Cfg["Configured"] && Cfg["Mic"] = "")
 
 ResolvePaths()
+DeleteOldUpdateInstallers()
 ; Notifications are attributed to the process's AppUserModelID; the
 ; installer's Start menu shortcut carries the same one, which is what
 ; makes Windows title them "Whispers" with our icon, not "AutoHotkey".
@@ -1256,6 +1257,22 @@ Warn(msg) {
     if !Cfg["ShowIndicator"]
         Notify(msg)
     SetState(gPausedState())
+}
+
+; The installer an update downloaded is still running when Whispers exits
+; for it, so it cannot be removed then; it is removed at the next start.
+; A file still locked (the installer has not finished) is left for the
+; start after that.
+DeleteOldUpdateInstallers() {
+    global TEMP_DIR
+    loop files TEMP_DIR "\*.*" {
+        if IsUpdateInstallerName(A_LoopFileName) {
+            try {
+                FileDelete(A_LoopFileFullPath)
+                LogMsg("INFO", "Removed the installer of a past update: " A_LoopFileName)
+            }
+        }
+    }
 }
 
 ; The four sounds tools\build-sounds.ps1 synthesizes, read once into

@@ -136,6 +136,14 @@ ReleaseAssetFrom(json, suffix) {
     return Map("name", m[1], "url", m[3], "sha256", StrLower(m[2]))
 }
 
+; Whether a file in the scratch directory is an update installer that a
+; previous update downloaded (or half-downloaded). Nothing deletes it at
+; the time: it is running when Whispers exits. Matched on the asset name
+; the releases use, so nothing else that lands there is ever touched.
+IsUpdateInstallerName(name) {
+    return RegExMatch(name, "i)^Whispers-\d+(\.\d+)*-setup\.exe(\.part)?$") != 0
+}
+
 ; ---------------------------------------------------------------------
 ; versions.json
 ; ---------------------------------------------------------------------

@@ -171,8 +171,15 @@ function IniValue($section, $key) {
     return $null
 }
 
+# The log must start empty: every wait below matches lines in it, and a
+# line left by an earlier instance satisfies a wait for the new one. A
+# log that cannot be deleted (seen: one written by the installed copy,
+# under an app container's virtualised profile) is emptied instead. It
+# was why 'it reports its own root directory' failed now and then: the
+# wait for the startup line returned at once, on the installed copy's.
 function StartWhispers {
     Remove-Item $logFile -EA SilentlyContinue
+    if (Test-Path $logFile) { Clear-Content $logFile -EA SilentlyContinue }
     $p = Start-Process $Ahk -ArgumentList (Join-Path $root 'Whispers.ahk') -PassThru
     return $p
 }
@@ -275,7 +282,7 @@ try {
     WriteIni 'max' $modelsDir
     $app = StartWhispers
 
-    AssertTrue 'the script starts' (WaitForLog 'started\. Root=' 20) 'no startup line in the log'
+    AssertTrue 'the script starts' (WaitForLog ('started\. Root=' + [regex]::Escape($root)) 20) 'no startup line from this checkout in the log'
     AssertLog 'it reports its own root directory' ([regex]::Escape($root))
     AssertLog 'the tier resolves to a model file' 'Tier=max \(ggml-.*\.bin\)'
     RefuteLog 'versions.json resolves without error' 'cannot resolve tier'
